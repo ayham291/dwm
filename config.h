@@ -15,7 +15,7 @@ static int swallowfloating    = 0;        /* 1 means swallow floating windows by
 static int smartgaps          = 0;        /* 1 means no outer gap when there is only one window */
 static int showbar            = 1;        /* 0 means no bar */
 static int topbar             = 1;        /* 0 means bottom bar */
-static char *fonts[]          = { "monospace:size=11", "JoyPixels:pixelsize=11:antialias=true:autohint=true"  };
+static char *fonts[]          = { "monospace:size=12", "JoyPixels:pixelsize=12:antialias=true:autohint=true"  };
 static char normbgcolor[]           = "#222222";
 static char normbordercolor[]       = "#444444";
 static char normfgcolor[]           = "#bbbbbb";
@@ -54,7 +54,7 @@ static const Rule rules[] = {
 	{ NULL,       NULL,       "Event Tester",   0,            0,           0,         1,        -1 },
 	{ NULL,      "spterm",    NULL,       	    SPTAG(0),     1,           1,         0,        -1 },
 	{ NULL,      "spcalc",    NULL,       	    SPTAG(1),     1,           1,         0,        -1 },
-	{ "zoom",      "zoom",    NULL,       	    SPTAG(1),     1,           0,         0,        -1 },
+	{ "zoom",      "zoom",    NULL,       	    1<<4,         1,           0,         0,        -1 },
 };
 
 /* layout(s) */
