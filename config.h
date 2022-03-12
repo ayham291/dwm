@@ -203,6 +203,7 @@ static Key keys[] = {
 	{ MODKEY|ShiftMask,		XK_semicolon,	shifttag,	{ .i = 1 } },
 	{ MODKEY,			XK_apostrophe,	togglescratch,	{.ui = 1} },
 	/* { MODKEY|ShiftMask,		XK_apostrophe,	spawn,		SHCMD("") }, */
+	{ MODKEY|ShiftMask,		XK_apostrophe,	togglesmartgaps,	{0} },
 	{ MODKEY,			XK_Return,	spawn,		{.v = termcmd } },
 	{ MODKEY|ShiftMask,		XK_Return,	togglescratch,	{.ui = 0} },
 
@@ -238,7 +239,6 @@ static Key keys[] = {
 	{ MODKEY,			XK_Insert,	spawn,		SHCMD("xdotool type $(grep -v '^#' ~/.local/share/larbs/snippets | dmenu -i -l 50 | cut -d' ' -f1)") },
 
 	{ MODKEY,			XK_F1,		spawn,		SHCMD("groff -mom /usr/local/share/dwm/larbs.mom -Tpdf | zathura -") },
-	/* { MODKEY,			XK_F2,		spawn,		SHCMD("tutorialvids") }, */
 	{ MODKEY,			XK_F3,		spawn,		SHCMD("displayselect") },
 	{ MODKEY,			XK_F4,		spawn,		SHCMD(TERMINAL " -e pulsemixer; kill -44 $(pidof dwmblocks)") },
 	/* { MODKEY,			XK_F5,		xrdb,		{.v = NULL } }, */
