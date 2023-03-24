@@ -548,4 +548,3 @@ tile(Monitor *m)
 			sy += HEIGHT(c) + ih;
 		}
 }
-

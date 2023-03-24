@@ -15,6 +15,7 @@ Pressing \f(CWs\fP will fit it to window width (\f(CWa\fP to revert).
 \f(CWK\fP and \f(CWJ\fP zoom in and out.
 \f(CWSuper+f\fP to toggle fullscreen.
 \f(CWq\fP to quit.
+\f(CW/\fP to search for text.
 (These are general binds set for \fBzathura\fP, the pdf reader.)
 .LI
 .ITEM
@@ -76,6 +77,9 @@ You can also right click on the module to see what it does.
 .PP
 The program dwmblocks is what is run to generate the statusbar from those scripts.
 You can edit its config/source code in \f(CW~/.local/src/dwmblocks/\fP to tell it what scripts/commands you want it to display.
+.HEADING 3 "HiDPI and 4K Displays"
+.PP
+If you have a screen with a very high dots-per-inch, the interface, particularly the status bar at the top may be very small. To change this, you can run \f(CWxrandr --dpi 96\fP, replacing 96 with a higher number, then you can refresh the window manager in the menu at \f(CWsuper+backspace\fP. To make this change persistent after reboot, edit \f(CW~/.xprofile\fP and you will see that same command which you can change to have the dots-per-inch value you want.
 .HEADING 2 "Deeper Tutorials"
 .PP
 Press \f(CWmod+F2\fP at any time to get a menu of programs to watch videos about streaming directly from YouTube.
@@ -130,7 +134,7 @@ To type capital letters, hold down the \f(CWShift\fP key\(emthat might sound lik
 .ITEM
 \f(CWMod+F\fP \(en Floating (AKA normie) mode
 .ITEM
-\f(CWMod+y\fP \(en Fibbonacci spiral mode
+\f(CWMod+y\fP \(en Fibonacci spiral mode
 .ITEM
 \f(CWMod+Y\fP \(en Dwindle mode (similar to Fibonacci)
 .ITEM
@@ -157,7 +161,7 @@ To type capital letters, hold down the \f(CWShift\fP key\(emthat might sound lik
 .ITEM
 \f(CWMod+m\fP \(en ncmpcpp (music player)
 .ITEM
-\f(CWMod+w\fP \(en Web browser (Brave by default)
+\f(CWMod+w\fP \(en Web browser (LibreWolf by default)
 .ITEM
 \f(CWMod+W\fP \(en nmtui (for connecting to wireless internet)
 .ITEM
@@ -217,7 +221,7 @@ There are nine tags, active tags are highlighted in the top left.
 .ITEM
 \f(CWMod+F11\fP \(en View webcam
 .ITEM
-\f(CWMod+F12\fP \(en Rerun kayboard mapping scripts if new keyboard is attached
+\f(CWMod+F12\fP \(en Rerun keyboard mapping scripts if new keyboard is attached
 .ITEM
 \f(CWMod+`\fP \(en Select an emoji to copy to clipboard
 .ITEM
@@ -306,7 +310,7 @@ In the Linux terminal, those binds have other more important purposes, so you ca
 Additionally, I've set vim to use the clipboard as the default buffer, which means when you yank or delete something in vim, it will be in your system clipboard as well, so you can \f(CWctrl-v\fP it into your browser instance, etc. You can also paste material copied from other programs into vim with the typical vim bindings.
 .HEADING 2 "How do I change the background/wallpaper?"
 .PP
-The system will always read the file \f(CW~/.config/wall.png\fP as the wallpaper.
+The system will always read the file \f(CW~/.local/share/bg\fP as the wallpaper.
 The script \f(CWsetbg\fP, if run on an image will set it as the persistent background.
 When using the file manager, you can simply hover over an image name and type \f(CWb\fP and this will run \f(CWsetbg\fP.
 .HEADING 2 "How I change the colorscheme?"
@@ -323,7 +327,7 @@ See \f(CWman mw\fP for all the information you need about mutt-wizard.
 Once you have successfully added your email address(es), you can open your mail with \f(CWneomutt\fP which is also bound to \f(CWMod+e\fP.
 You can sync your mail by pressing \f(CWMod+F8\fP and you can set a cronjob to sync mail every 10 minutes by running \f(CWmw -t 10\fP.
 .PP
-You may also want to install \f(CWpam-gnupg-git\fP, which can be set up to automatically unlock your GPG key on login, which will allow you avoid having put in a password to sync and send, all while keeping your password safe and encypted on your machine.
+You may also want to install \f(CWpam-gnupg-git\fP, which can be set up to automatically unlock your GPG key on login, which will allow you avoid having put in a password to sync and send, all while keeping your password safe and encrypted on your machine.
 .HEADING 2 "How do I set up my music?"
 .PP
 By default, mpd, the music daemon assumes that \f(CW~/Music\fP is your music directory.
