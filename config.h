@@ -3,6 +3,7 @@
 /* Constants */
 #define TERMINAL "st"
 #define TERMCLASS "St"
+#define BROWSER "brave"
 
 /* appearance */
 static unsigned int borderpx  = 3;        /* border pixel of windows */
@@ -15,13 +16,13 @@ static int swallowfloating    = 0;        /* 1 means swallow floating windows by
 static int smartgaps          = 0;        /* 1 means no outer gap when there is only one window */
 static int showbar            = 1;        /* 0 means no bar */
 static int topbar             = 1;        /* 0 means bottom bar */
-static char *fonts[]          = { "monospace:size=11", "JoyPixels:pixelsize=11:antialias=true:autohint=true"  };
+static char *fonts[]          = { "monospace:size=12", "JoyPixels:pixelsize=12:antialias=true:autohint=true"  };
 static char normbgcolor[]           = "#222222";
 static char normbordercolor[]       = "#444444";
 static char normfgcolor[]           = "#bbbbbb";
 static char selfgcolor[]            = "#eeeeee";
 static char selbordercolor[]        = "#E0AA00";
-static char selbgcolor[]            = "#005577";
+static char selbgcolor[]            = "#4C4C4C";
 static char *colors[][3] = {
        /*               fg           bg           border   */
        [SchemeNorm] = { normfgcolor, normbgcolor, normbordercolor },
@@ -52,7 +53,7 @@ static const Rule rules[] = {
 	{ "Gimp",     NULL,       NULL,       	    1 << 8,       0,           0,         0,        -1 },
 	{ TERMCLASS,   NULL,       NULL,       	    0,            0,           1,         0,        -1 },
 	{ NULL,       NULL,       "Event Tester",   0,            0,           0,         1,        -1 },
-	{ TERMCLASS,      "floatterm", NULL,       	    0,       1,           1,         0,        -1 },
+	/* { TERMCLASS,      "floatterm", NULL,       	    0,       1,           1,         0,        -1 }, */
 	{ NULL,      "spterm",    NULL,       	    SPTAG(0),     1,           1,         0,        -1 },
 	{ NULL,      "spcalc",    NULL,       	    SPTAG(1),     1,           1,         0,        -1 },
 	{ "zoom",      "zoom",    NULL,       	    SPTAG(1),     1,           0,         0,        -1 },
