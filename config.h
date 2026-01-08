@@ -1,9 +1,9 @@
 /* See LICENSE file for copyright and license details. */
 
 /* Constants */
-#define TERMINAL "st"
-#define TERMCLASS "St"
-#define BROWSER "brave"
+#define TERMINAL "ghostty"
+#define TERMCLASS "com.mitchellh.ghostty"
+#define BROWSER "zen-browser"
 
 /* appearance */
 static unsigned int borderpx  = 3;        /* border pixel of windows */
@@ -33,8 +33,12 @@ typedef struct {
 	const char *name;
 	const void *cmd;
 } Sp;
-const char *spcmd1[] = {TERMINAL, "-n", "spterm", "-g", "120x34", NULL };
-const char *spcmd2[] = {TERMINAL, "-n", "spcalc", "-f", "monospace:size=16", "-g", "50x20", "-e", "bc", "-lq", NULL };
+// ST Suckless Terminal old command
+// const char *spcmd1[] = {TERMINAL, "-n", "spterm", "-g", "120x34", NULL };
+// Ghostty new command (window-width=columns, window-height=rows)
+const char *spcmd1[] = {TERMINAL, "--title=spterm", "--x11-instance-name=spterm", "--window-width=120", "--window-height=34", NULL };
+// const char *spcmd2[] = {TERMINAL, "-n", "spcalc", "-f", "monospace:size=16", "-g", "50x20", "-e", "bc", "-lq", NULL };
+const char *spcmd2[] = {TERMINAL, "--title=spcalc", "--x11-instance-name=spcalc", "--font-size=16", "--window-width=50", "--window-height=20", "-e", "bc", "-lq", NULL };
 static Sp scratchpads[] = {
 	/* name          cmd  */
 	{"spterm",      spcmd1},

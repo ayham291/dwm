@@ -759,10 +759,15 @@ configurerequest(XEvent *e)
 				c->oldh = c->h;
 				c->h = ev->height;
 			}
-			if ((c->x + c->w) > m->mx + m->mw && c->isfloating)
-				c->x = m->mx + (m->mw / 2 - WIDTH(c) / 2); /* center in x direction */
-			if ((c->y + c->h) > m->my + m->mh && c->isfloating)
-				c->y = m->my + (m->mh / 2 - HEIGHT(c) / 2); /* center in y direction */
+		if ((c->x + c->w) > m->mx + m->mw && c->isfloating)
+			c->x = m->mx + (m->mw / 2 - WIDTH(c) / 2); /* center in x direction */
+		if ((c->y + c->h) > m->my + m->mh && c->isfloating)
+			c->y = m->my + (m->mh / 2 - HEIGHT(c) / 2); /* center in y direction */
+		/* center scratchpad windows when resized */
+		if ((c->tags & SPTAGMASK) && c->isfloating && (ev->value_mask & (CWWidth|CWHeight))) {
+			c->x = c->mon->wx + (c->mon->ww / 2 - WIDTH(c) / 2);
+			c->y = c->mon->wy + (c->mon->wh / 2 - HEIGHT(c) / 2);
+		}
 			if ((ev->value_mask & (CWX|CWY)) && !(ev->value_mask & (CWWidth|CWHeight)))
 				configure(c);
 			if (ISVISIBLE(c))
