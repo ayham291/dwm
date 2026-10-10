@@ -49,7 +49,9 @@ cargo run -p dwm-wayland
 
 Set `DWM_WAYLAND_NO_AUTOSTART=1` to skip spawning the default terminal.
 
-### Key bindings (Super / Mod4)
+### Key bindings (Super / Mod4, or Alt in nested sessions)
+
+Host window managers often grab Super; nested runs also accept **Alt** as the mod key.
 
 | Keys | Action |
 |------|--------|
