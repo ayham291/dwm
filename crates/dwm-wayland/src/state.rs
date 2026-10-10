@@ -677,7 +677,6 @@ pub fn run() -> Result<(), Error> {
                 .bind()
                 .map_err(|e| Error::Winit(format!("bind: {e:?}")))?;
 
-            let mut elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
             let tagset = state.monitor.tagset();
             let bw = state.config.border_px as i32;
             let sel_border = color::parse_hex(&state.config.sel_border);
@@ -703,7 +702,14 @@ pub fn run() -> Result<(), Error> {
                 .collect();
             visible.sort_by_key(|c| c.floating || c.fullscreen);
 
-            let mut border_rects: Vec<(Rectangle<i32, Logical>, Color32F)> = Vec::new();
+            // Collect per-client surface elements + clip rects so oversized
+            // client buffers (e.g. foot -W) cannot paint outside float_geom.
+            let mut draws: Vec<(
+                Rectangle<i32, Logical>,
+                Color32F,
+                Vec<WaylandSurfaceRenderElement<GlesRenderer>>,
+                Rectangle<i32, Logical>,
+            )> = Vec::new();
             for client in visible {
                 let Some(toplevel) = state.toplevels.get(&client.id) else {
                     continue;
@@ -720,17 +726,20 @@ pub fn run() -> Result<(), Error> {
                     (client.geom.x - bw, client.geom.y - bw).into(),
                     (client.geom.w + 2 * bw, client.geom.h + 2 * bw).into(),
                 );
-                border_rects.push((outer, border_color));
-
+                let clip = Rectangle::new(
+                    (client.geom.x, client.geom.y).into(),
+                    (client.geom.w, client.geom.h).into(),
+                );
                 let loc: Point<i32, Logical> = (client.geom.x, client.geom.y).into();
-                elements.extend(render_elements_from_surface_tree(
+                let surf = render_elements_from_surface_tree(
                     renderer,
                     toplevel.wl_surface(),
                     loc.to_physical_precise_round(1.0),
                     1.0,
                     1.0,
                     Kind::Unspecified,
-                ));
+                );
+                draws.push((outer, border_color, surf, clip));
             }
 
             let mut frame = renderer
@@ -741,7 +750,7 @@ pub fn run() -> Result<(), Error> {
                 .clear(color::parse_hex(&state.config.norm_bg), &[damage])
                 .map_err(|e| Error::Winit(format!("clear: {e:?}")))?;
             // dwm-style borders: solid frame under the client content.
-            for (rect, border_color) in &border_rects {
+            for (rect, border_color, _, _) in &draws {
                 let phys = rect.to_physical_precise_round(1.0);
                 frame
                     .clear(*border_color, &[phys])
@@ -751,8 +760,11 @@ pub fn run() -> Result<(), Error> {
                 draw_render_elements(&mut frame, 1.0, &[bar], &[damage])
                     .map_err(|e| Error::Winit(format!("bar: {e:?}")))?;
             }
-            draw_render_elements(&mut frame, 1.0, &elements, &[damage])
-                .map_err(|e| Error::Winit(format!("draw: {e:?}")))?;
+            for (_, _, surf, clip) in &draws {
+                let clip_phys = clip.to_physical_precise_round(1.0);
+                draw_render_elements(&mut frame, 1.0, surf, &[clip_phys])
+                    .map_err(|e| Error::Winit(format!("draw: {e:?}")))?;
+            }
             let _ = frame
                 .finish()
                 .map_err(|e| Error::Winit(format!("finish: {e:?}")))?;

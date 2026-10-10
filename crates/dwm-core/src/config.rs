@@ -81,7 +81,9 @@ impl Default for Config {
                 ScratchpadConfig {
                     name: "spterm".into(),
                     match_title: "spterm".into(),
-                    command: scratch_spawn(&terminal, "spterm", &[], 120, 34),
+                    // Modest grid so nested/small outputs still float with margins;
+                    // compositor configure + clip enforce the pixel size.
+                    command: scratch_spawn(&terminal, "spterm", &[], 80, 24),
                     width: 960,
                     height: 640,
                 },
