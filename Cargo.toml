@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/dwm-core",
+    "crates/dwm-wayland",
+]
+default-members = [
+    "crates/dwm-core",
+    "crates/dwm-wayland",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/ayham291/dwm"
+
+[workspace.dependencies]
+dwm-core = { path = "crates/dwm-core" }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=dwm-wayland
+Comment=dwm-inspired tiling Wayland compositor
+Exec=dwm-wayland --session
+Type=Application
+DesktopNames=dwm-wayland

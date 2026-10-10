@@ -1,0 +1,10 @@
+[package]
+name = "dwm-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pure window-management logic ported from Luke's dwm (layouts, tags, gaps)"
+
+[dependencies]
+
+[dev-dependencies]
