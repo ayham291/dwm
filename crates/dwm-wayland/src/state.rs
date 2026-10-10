@@ -20,8 +20,10 @@ use smithay::input::keyboard::FilterResult;
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::reexports::wayland_server::protocol::wl_seat;
 use smithay::reexports::wayland_server::Display;
+use smithay::output::{Mode as OutputMode, Output, PhysicalProperties, Scale, Subpixel};
 use smithay::utils::{Logical, Point, Rectangle, Serial, Size, Transform};
 use smithay::wayland::buffer::BufferHandler;
+use smithay::wayland::output::{OutputHandler, OutputManagerState};
 use smithay::wayland::compositor::{
     with_surface_tree_downward, CompositorClientState, CompositorHandler, CompositorState,
     SurfaceAttributes, TraversalAction,
@@ -35,7 +37,8 @@ use smithay::wayland::shell::xdg::{
 };
 use smithay::wayland::shm::{ShmHandler, ShmState};
 use smithay::{
-    delegate_compositor, delegate_data_device, delegate_seat, delegate_shm, delegate_xdg_shell,
+    delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm,
+    delegate_xdg_shell,
 };
 use tracing::{info, warn};
 use wayland_protocols::xdg::shell::server::xdg_toplevel;
@@ -65,7 +68,9 @@ struct DwmState {
     shm_state: ShmState,
     seat_state: SeatState<Self>,
     data_device_state: DataDeviceState,
+    _output_manager_state: OutputManagerState,
     seat: Seat<Self>,
+    output: Output,
 
     monitor: Monitor,
     config: Config,
@@ -85,13 +90,40 @@ impl DwmState {
         let config = Config::default();
         let mut seat_state = SeatState::new();
         let seat = seat_state.new_wl_seat(dh, "dwm");
+
+        let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(dh);
+        let output = Output::new(
+            "dwm-0".into(),
+            PhysicalProperties {
+                size: (screen.w, screen.h).into(),
+                subpixel: Subpixel::Unknown,
+                make: "dwm-wayland".into(),
+                model: "winit".into(),
+            },
+        );
+        let _global = output.create_global::<Self>(dh);
+        let mode = OutputMode {
+            size: (screen.w, screen.h).into(),
+            refresh: 60_000,
+        };
+        output.change_current_state(
+            Some(mode),
+            Some(Transform::Normal),
+            Some(Scale::Integer(1)),
+            Some((0, 0).into()),
+        );
+        output.set_preferred(mode);
+        output.add_mode(mode);
+
         Self {
             compositor_state: CompositorState::new::<Self>(dh),
             xdg_shell_state: XdgShellState::new::<Self>(dh),
             shm_state: ShmState::new::<Self>(dh, vec![]),
             seat_state,
             data_device_state: DataDeviceState::new::<Self>(dh),
+            _output_manager_state: output_manager_state,
             seat,
+            output,
             monitor: Monitor::from_config(&config, screen),
             config,
             bindings: bindings::default_bindings(),
@@ -100,6 +132,26 @@ impl DwmState {
             should_quit: false,
             layout_symbol: "[]=".into(),
         }
+    }
+
+    fn resize_output(&mut self, w: i32, h: i32) {
+        let mode = OutputMode {
+            size: (w, h).into(),
+            refresh: 60_000,
+        };
+        self.output.delete_mode(
+            self.output
+                .current_mode()
+                .unwrap_or(mode),
+        );
+        self.output.add_mode(mode);
+        self.output.set_preferred(mode);
+        self.output.change_current_state(
+            Some(mode),
+            Some(Transform::Normal),
+            Some(Scale::Integer(1)),
+            Some((0, 0).into()),
+        );
     }
 
     fn apply_command(&mut self, cmd: Command) {
@@ -283,11 +335,14 @@ impl SeatHandler for DwmState {
     }
 }
 
+impl OutputHandler for DwmState {}
+
 delegate_xdg_shell!(DwmState);
 delegate_compositor!(DwmState);
 delegate_shm!(DwmState);
 delegate_seat!(DwmState);
 delegate_data_device!(DwmState);
+delegate_output!(DwmState);
 
 #[derive(Default)]
 struct ClientState {
@@ -372,6 +427,7 @@ pub fn run() -> Result<(), Error> {
 
         let status = winit_loop.dispatch_new_events(|event| match event {
             WinitEvent::Resized { size, .. } => {
+                state.resize_output(size.w, size.h);
                 state.monitor.set_screen(Rect::new(0, 0, size.w, size.h));
                 let (geoms, symbol) = state.monitor.arrange();
                 state.layout_symbol = symbol;

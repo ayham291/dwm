@@ -21,7 +21,11 @@ The original X11 C sources are preserved under [`legacy/`](legacy/).
 ```bash
 # System deps (Debian/Ubuntu)
 sudo apt install pkg-config libwayland-dev wayland-protocols \
-  libxkbcommon-dev libegl1-mesa-dev
+  libxkbcommon-dev libxkbcommon-x11-0 libegl1-mesa-dev
+
+# Nested sessions also need a writable XDG_RUNTIME_DIR
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/tmp/runtime-$USER}
+mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
 
 cargo build --release
 ```
