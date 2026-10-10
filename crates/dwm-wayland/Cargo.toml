@@ -1,0 +1,38 @@
+[package]
+name = "dwm-wayland"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "dwm-inspired tiling Wayland compositor (smithay + dwm-core)"
+rust-version = "1.80"
+
+[[bin]]
+name = "dwm-wayland"
+path = "src/main.rs"
+
+[dependencies]
+dwm-core = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = "1"
+wayland-server = "0.31.9"
+wayland-protocols = { version = "0.32.8", features = ["server", "staging", "unstable"] }
+
+[dependencies.winit]
+version = "0.30"
+default-features = false
+features = ["wayland", "wayland-dlopen", "x11", "rwh_06"]
+
+[dependencies.smithay]
+version = "0.7"
+default-features = false
+features = [
+    "wayland_frontend",
+    "backend_winit",
+    "backend_egl",
+    "renderer_gl",
+    "desktop",
+]
+
+[dev-dependencies]
+dwm-core = { workspace = true }

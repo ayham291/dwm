@@ -1,36 +1,80 @@
-# Luke's build of dwm
+# dwm-wayland (Rust)
 
-## FAQ
+A [dwm](https://dwm.suckless.org/)-inspired **tiling Wayland compositor** rewritten in Rust.
 
-> What are the bindings?
+Window-management logic (tags, layouts, vanity gaps, stacker, shiftview, sticky, …)
+lives in a pure library crate so it can be tested without a GPU. The compositor
+binary uses [smithay](https://github.com/Smithay/smithay) for the Wayland frontend
+and the winit backend for nested sessions.
 
-This is suckless, mmmbud, the source code is the documentation! Check out [config.h](config.h).
+The original X11 C sources are preserved under [`legacy/`](legacy/).
 
-Okay, okay, actually I keep a readme in `larbs.mom` for my whole system, including the binds here.
-Press <kbd>super+F1</kbd> to view it in dwm (zathura is required for that binding).
-I haven't kept `man dwm`/`dwm.1` updated though. PRs welcome on that, lol.
+## Crates
 
-## Patches and features
+| Crate | Role |
+|-------|------|
+| `dwm-core` | Pure WM state machine + layout algorithms |
+| `dwm-wayland` | Wayland compositor (`smithay` + winit) |
 
-- [Clickable statusbar](https://dwm.suckless.org/patches/statuscmd/) with my build of [dwmblocks](https://github.com/lukesmithxyz/dwmblocks).
-- Reads [xresources](https://dwm.suckless.org/patches/xresources/) colors/variables (i.e. works with `pywal`, etc.).
-- scratchpad: Accessible with <kbd>mod+shift+enter</kbd>.
-- New layouts: bstack, fibonacci, deck, centered master and more. All bound to keys <kbd>super+(shift+)t/y/u/i</kbd>.
-- True fullscreen (<kbd>super+f</kbd>) and prevents focus shifting.
-- Windows can be made sticky (<kbd>super+s</kbd>).
-- [hide vacant tags](https://dwm.suckless.org/patches/hide_vacant_tags/) hides tags with no windows.
-- [stacker](https://dwm.suckless.org/patches/stacker/): Move windows up the stack manually (<kbd>super-K/J</kbd>).
-- [shiftview](https://dwm.suckless.org/patches/nextprev/): Cycle through tags (<kbd>super+g/;</kbd>).
-- [vanitygaps](https://dwm.suckless.org/patches/vanitygaps/): Gaps allowed across all layouts.
-- [swallow patch](https://dwm.suckless.org/patches/swallow/): if a program run from a terminal would make it inoperable, it temporarily takes its place to save space.
-
-
-## Installation for newbs
+## Build
 
 ```bash
-git clone https://github.com/LukeSmithxyz/dwm.git
-cd dwm
-sudo make install
+# System deps (Debian/Ubuntu)
+sudo apt install pkg-config libwayland-dev wayland-protocols \
+  libxkbcommon-dev libegl1-mesa-dev
+
+cargo build --release
 ```
 
-There is also a `PKGBUILD` usable on distributions with pacman. Run `makepkg -si` instead of `sudo make install`.
+## Test
+
+```bash
+cargo test --workspace
+cargo run -p dwm-wayland -- --check   # protocol + core smoke test (no GPU loop)
+```
+
+## Run (nested)
+
+Under an existing X11 or Wayland session:
+
+```bash
+cargo run -p dwm-wayland
+# or
+./target/release/dwm-wayland
+```
+
+Set `DWM_WAYLAND_NO_AUTOSTART=1` to skip spawning the default terminal.
+
+### Key bindings (Super / Mod4)
+
+| Keys | Action |
+|------|--------|
+| `j` / `k` | Focus next / previous |
+| `Shift+j` / `k` | Push down / up stack |
+| `1`…`9` | View tag |
+| `Shift+1`…`9` | Move client to tag |
+| `t` / `Shift+t` | Tile / bottomstack |
+| `y` / `Shift+y` | Spiral / dwindle |
+| `u` / `Shift+u` | Deck / monocle |
+| `i` / `Shift+i` | Centered master / centered floating master |
+| `f` | Toggle floating |
+| `s` | Toggle sticky |
+| `a` | Toggle gaps |
+| `h` / `l` | Shrink / grow master |
+| `o` / `Shift+o` | Inc / dec `nmaster` |
+| `Return` | Spawn terminal (`ghostty`) |
+| `d` | `dmenu_run` |
+| `q` / `Shift+q` | Kill client / quit |
+
+## Layouts
+
+Ported from the vanitygaps-patched build in `legacy/`:
+
+`[]=` tile · `TTT` bstack · `[@]` spiral · `[\]` dwindle · `[D]` deck · `[M]` monocle · `|M|` centeredmaster · `>M>` centeredfloatingmaster · `><>` floating
+
+## Legacy X11 dwm
+
+```bash
+cd legacy && make
+sudo make install
+```
