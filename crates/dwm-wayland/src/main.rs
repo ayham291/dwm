@@ -15,7 +15,7 @@
 //! cargo run -p dwm-wayland -- --check
 //! ```
 //!
-//! Attempt a libseat/udev session backend (feature `session`):
+//! Experimental DRM/libseat TTY session (feature `session`; use a spare VT):
 //!
 //! ```text
 //! cargo run -p dwm-wayland -- --session
@@ -101,7 +101,7 @@ USAGE:
 
 OPTIONS:
     --check     Initialize Wayland globals and dwm-core state, then exit
-    --session   Run the libseat/udev TTY session backend (feature: session)
+    --session   Experimental DRM/libseat TTY session (feature: session; spare VT)
     -h, --help  Show this help
 
 KEY BINDINGS (Super / Mod4, or Alt in nested sessions):

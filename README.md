@@ -55,15 +55,21 @@ Path defaults to `$XDG_RUNTIME_DIR/dwm-wayland.status` (see `Config::status_file
 ## Build
 
 ```bash
-# System deps (Debian/Ubuntu)
+# System deps (Debian/Ubuntu) — nested (winit) path
 sudo apt install pkg-config libwayland-dev wayland-protocols \
   libxkbcommon-dev libxkbcommon-x11-0 libegl1-mesa-dev
+
+# Extra deps for TTY session backend (`--session`, cargo feature `session`)
+sudo apt install libseat-dev libinput-dev libgbm-dev libdrm-dev \
+  libudev-dev xwayland
 
 # Nested sessions also need a writable XDG_RUNTIME_DIR
 export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/tmp/runtime-$USER}
 mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
 
 cargo build --release
+# Nested-only binary (no libseat/DRM):
+cargo build -p dwm-wayland --no-default-features --release
 ```
 
 ## Test
@@ -73,17 +79,35 @@ cargo test --workspace
 cargo run -p dwm-wayland -- --check   # protocol + core smoke test (no GPU loop)
 ```
 
-## Run (nested)
+## Run nested (default / recommended for development)
 
-Under an existing X11 or Wayland session:
+Under an existing X11 or Wayland session (winit window):
 
 ```bash
+# Default features include `session`, but omitting `--session` still uses winit:
 cargo run -p dwm-wayland
+# Explicit nested-only build:
+cargo run -p dwm-wayland --no-default-features
 # or
 ./target/release/dwm-wayland
 ```
 
 Set `DWM_WAYLAND_NO_AUTOSTART=1` to skip spawning the default terminal.
+
+## Run on a TTY (`--session`) — experimental
+
+The DRM/libseat/libinput backend is **experimental**. Prefer a spare TTY (e.g. Ctrl+Alt+F3), not your daily desktop session, until it stabilizes.
+
+```bash
+# From a spare virtual terminal (log in as your user):
+cargo run -p dwm-wayland -- --session
+# Optional: pin a DRM node
+DWM_WAYLAND_DRM_DEVICE=/dev/dri/card0 cargo run -p dwm-wayland -- --session
+```
+
+Requirements: a working seat (seatd or systemd-logind), `/dev/dri`, and at least one connected display. If `LibSeatSession` or DRM open fails, the process exits with an error (it does not fall back to winit).
+
+**Status:** single-GPU / first-connector modeset, libinput, session pause/resume, and a clear+client render loop are wired. Multi-output layout, DRM leasing, dmabuf feedback, and polished VT switching are still gaps — do not treat this as a daily driver yet.
 
 ### Key bindings (Super / Mod4, or Alt in nested sessions)
 

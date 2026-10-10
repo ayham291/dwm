@@ -11,7 +11,7 @@ use smithay::backend::renderer::element::surface::{
     render_elements_from_surface_tree, WaylandSurfaceRenderElement,
 };
 use smithay::backend::renderer::element::Kind;
-use smithay::backend::renderer::gles::GlesRenderer;
+use smithay::backend::renderer::gles::{GlesRenderer, GlesTarget};
 use smithay::backend::renderer::utils::{draw_render_elements, on_commit_buffer_handler};
 use smithay::backend::renderer::{Color32F, Frame, Renderer};
 use smithay::backend::winit::{self as winit_backend, WinitEvent};
@@ -19,8 +19,10 @@ use smithay::desktop::{find_popup_root_surface, PopupKind, PopupManager};
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::output::{Mode as OutputMode, Output, PhysicalProperties, Scale, Subpixel};
 use smithay::reexports::wayland_server::protocol::{wl_output, wl_seat};
+#[cfg(feature = "session")]
+use smithay::reexports::wayland_server::protocol::wl_shm;
 use smithay::reexports::wayland_server::Display;
-use smithay::utils::{Logical, Point, Rectangle, Serial, Size, Transform};
+use smithay::utils::{Logical, Physical, Point, Rectangle, Serial, Size, Transform};
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{
     with_surface_tree_downward, CompositorClientState, CompositorHandler, CompositorState,
@@ -107,12 +109,6 @@ pub struct DwmState {
 
 impl DwmState {
     fn new(dh: &DisplayHandle, screen: Rect) -> Self {
-        let config = Config::default();
-        let mut seat_state = SeatState::new();
-        let mut seat = seat_state.new_wl_seat(dh, "dwm");
-        seat.add_pointer();
-
-        let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(dh);
         let output = Output::new(
             "dwm-0".into(),
             PhysicalProperties {
@@ -135,6 +131,22 @@ impl DwmState {
         );
         output.set_preferred(mode);
         output.add_mode(mode);
+        Self::new_with_output(dh, "dwm", screen, output)
+    }
+
+    /// Build compositor state against an already-configured [`Output`] (session / nested).
+    pub(crate) fn new_with_output(
+        dh: &DisplayHandle,
+        seat_name: impl Into<String>,
+        screen: Rect,
+        output: Output,
+    ) -> Self {
+        let config = Config::default();
+        let mut seat_state = SeatState::new();
+        let mut seat = seat_state.new_wl_seat(dh, seat_name);
+        seat.add_pointer();
+
+        let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(dh);
 
         Self {
             compositor_state: CompositorState::new::<Self>(dh),
@@ -162,6 +174,157 @@ impl DwmState {
             last_status_read: Instant::now(),
             pending_scratch: None,
         }
+    }
+
+    #[cfg(feature = "session")]
+    pub(crate) fn should_quit(&self) -> bool {
+        self.should_quit
+    }
+
+    #[cfg(feature = "session")]
+    pub(crate) fn update_shm_formats(
+        &mut self,
+        formats: impl IntoIterator<Item = wl_shm::Format>,
+    ) {
+        self.shm_state.update_formats(formats);
+    }
+
+    pub(crate) fn refresh_status(&mut self) {
+        self.refresh_status_file();
+    }
+
+    /// Clear the framebuffer and draw borders, bar, clients, and popups (shared by winit/udev).
+    ///
+    /// Returns popup surfaces that need `wl_surface.frame` callbacks after the draw.
+    pub(crate) fn render_gles_frame(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        framebuffer: &mut GlesTarget<'_>,
+        size: Size<i32, Physical>,
+        transform: Transform,
+    ) -> Result<Vec<WlSurface>, String> {
+        let damage = Rectangle::from_size(size);
+        let tagset = self.monitor.tagset();
+        let bw = self.config.border_px as i32;
+        let sel_border = color::parse_hex(&self.config.sel_border);
+        let norm_border = color::parse_hex(&self.config.norm_border);
+        let focused = self.monitor.sel;
+        let bar_model = self.monitor.bar_model();
+        let bar_element = self.status_bar.element(
+            renderer,
+            &bar_model,
+            self.monitor.screen.h,
+            &self.config.norm_bg,
+            &self.config.norm_fg,
+            &self.config.sel_bg,
+            &self.config.sel_fg,
+        );
+
+        let mut visible: Vec<_> = self
+            .monitor
+            .visible_clients()
+            .into_iter()
+            .filter(|c| c.geom.w > 0 && c.geom.h > 0)
+            .collect();
+        visible.sort_by_key(|c| c.floating || c.fullscreen);
+
+        let mut draws: Vec<(
+            Rectangle<i32, Logical>,
+            Color32F,
+            Vec<WaylandSurfaceRenderElement<GlesRenderer>>,
+            Rectangle<i32, Logical>,
+        )> = Vec::new();
+        let mut popup_draws: Vec<Vec<WaylandSurfaceRenderElement<GlesRenderer>>> = Vec::new();
+        let mut popup_frame_surfaces: Vec<WlSurface> = Vec::new();
+        for client in visible {
+            let Some(toplevel) = self.toplevels.get(&client.id) else {
+                continue;
+            };
+            if !client.is_visible(tagset) {
+                continue;
+            }
+            let border_color = if focused == Some(client.id) {
+                sel_border
+            } else {
+                norm_border
+            };
+            let outer = Rectangle::new(
+                (client.geom.x - bw, client.geom.y - bw).into(),
+                (client.geom.w + 2 * bw, client.geom.h + 2 * bw).into(),
+            );
+            let clip = Rectangle::new(
+                (client.geom.x, client.geom.y).into(),
+                (client.geom.w, client.geom.h).into(),
+            );
+            let loc: Point<i32, Logical> = (client.geom.x, client.geom.y).into();
+            let surf = render_elements_from_surface_tree(
+                renderer,
+                toplevel.wl_surface(),
+                loc.to_physical_precise_round(1.0),
+                1.0,
+                1.0,
+                Kind::Unspecified,
+            );
+            draws.push((outer, border_color, surf, clip));
+
+            for (popup, offset) in PopupManager::popups_for_surface(toplevel.wl_surface()) {
+                let geo = popup.geometry();
+                let popup_loc: Point<i32, Logical> = (
+                    client.geom.x + offset.x + geo.loc.x,
+                    client.geom.y + offset.y + geo.loc.y,
+                )
+                    .into();
+                let popup_surf = render_elements_from_surface_tree(
+                    renderer,
+                    popup.wl_surface(),
+                    popup_loc.to_physical_precise_round(1.0),
+                    1.0,
+                    1.0,
+                    Kind::Unspecified,
+                );
+                popup_draws.push(popup_surf);
+                popup_frame_surfaces.push(popup.wl_surface().clone());
+            }
+        }
+
+        let mut frame = renderer
+            .render(framebuffer, size, transform)
+            .map_err(|e| format!("render: {e:?}"))?;
+        frame
+            .clear(color::parse_hex(&self.config.norm_bg), &[damage])
+            .map_err(|e| format!("clear: {e:?}"))?;
+        for (rect, border_color, _, _) in &draws {
+            let phys = rect.to_physical_precise_round(1.0);
+            frame
+                .clear(*border_color, &[phys])
+                .map_err(|e| format!("border: {e:?}"))?;
+        }
+        if let Some(bar) = &bar_element {
+            draw_render_elements(&mut frame, 1.0, &[bar], &[damage])
+                .map_err(|e| format!("bar: {e:?}"))?;
+        }
+        for (_, _, surf, clip) in &draws {
+            let clip_phys = clip.to_physical_precise_round(1.0);
+            draw_render_elements(&mut frame, 1.0, surf, &[clip_phys])
+                .map_err(|e| format!("draw: {e:?}"))?;
+        }
+        for surf in &popup_draws {
+            draw_render_elements(&mut frame, 1.0, surf, &[damage])
+                .map_err(|e| format!("popup: {e:?}"))?;
+        }
+        let _ = frame.finish().map_err(|e| format!("finish: {e:?}"))?;
+
+        Ok(popup_frame_surfaces)
+    }
+
+    pub(crate) fn send_frames(&mut self, time: u32, popup_surfaces: &[WlSurface]) {
+        for surface in self.xdg_shell_state.toplevel_surfaces() {
+            send_frames_surface_tree(surface.wl_surface(), time);
+        }
+        for surface in popup_surfaces {
+            send_frames_surface_tree(surface, time);
+        }
+        self.popups.cleanup();
     }
 
     /// Re-run the layout engine and push configures to all mapped clients.
@@ -635,7 +798,7 @@ delegate_primary_selection!(DwmState);
 delegate_output!(DwmState);
 
 #[derive(Default)]
-struct ClientState {
+pub(crate) struct ClientState {
     compositor_state: CompositorClientState,
 }
 
@@ -739,142 +902,17 @@ pub fn run() -> Result<(), Error> {
         let size = backend.window_size();
         let damage = Rectangle::from_size(size);
 
-        state.refresh_status_file();
+        state.refresh_status();
 
         {
             let (renderer, mut framebuffer) = backend
                 .bind()
                 .map_err(|e| Error::Winit(format!("bind: {e:?}")))?;
 
-            let tagset = state.monitor.tagset();
-            let bw = state.config.border_px as i32;
-            let sel_border = color::parse_hex(&state.config.sel_border);
-            let norm_border = color::parse_hex(&state.config.norm_border);
-            let focused = state.monitor.sel;
-            let bar_model = state.monitor.bar_model();
-            let bar_element = state.status_bar.element(
-                renderer,
-                &bar_model,
-                state.monitor.screen.h,
-                &state.config.norm_bg,
-                &state.config.norm_fg,
-                &state.config.sel_bg,
-                &state.config.sel_fg,
-            );
-
-            // Tiled first, floating (scratchpads) on top — classic dwm stacking.
-            let mut visible: Vec<_> = state
-                .monitor
-                .visible_clients()
-                .into_iter()
-                .filter(|c| c.geom.w > 0 && c.geom.h > 0)
-                .collect();
-            visible.sort_by_key(|c| c.floating || c.fullscreen);
-
-            // Collect per-client surface elements + clip rects so oversized
-            // client buffers (e.g. foot -W) cannot paint outside float_geom.
-            let mut draws: Vec<(
-                Rectangle<i32, Logical>,
-                Color32F,
-                Vec<WaylandSurfaceRenderElement<GlesRenderer>>,
-                Rectangle<i32, Logical>,
-            )> = Vec::new();
-            let mut popup_draws: Vec<Vec<WaylandSurfaceRenderElement<GlesRenderer>>> = Vec::new();
-            let mut popup_frame_surfaces: Vec<WlSurface> = Vec::new();
-            for client in visible {
-                let Some(toplevel) = state.toplevels.get(&client.id) else {
-                    continue;
-                };
-                if !client.is_visible(tagset) {
-                    continue;
-                }
-                let border_color = if focused == Some(client.id) {
-                    sel_border
-                } else {
-                    norm_border
-                };
-                let outer = Rectangle::new(
-                    (client.geom.x - bw, client.geom.y - bw).into(),
-                    (client.geom.w + 2 * bw, client.geom.h + 2 * bw).into(),
-                );
-                let clip = Rectangle::new(
-                    (client.geom.x, client.geom.y).into(),
-                    (client.geom.w, client.geom.h).into(),
-                );
-                let loc: Point<i32, Logical> = (client.geom.x, client.geom.y).into();
-                let surf = render_elements_from_surface_tree(
-                    renderer,
-                    toplevel.wl_surface(),
-                    loc.to_physical_precise_round(1.0),
-                    1.0,
-                    1.0,
-                    Kind::Unspecified,
-                );
-                draws.push((outer, border_color, surf, clip));
-
-                // Popups stack above their parent toplevel.
-                for (popup, offset) in PopupManager::popups_for_surface(toplevel.wl_surface()) {
-                    let geo = popup.geometry();
-                    let popup_loc: Point<i32, Logical> = (
-                        client.geom.x + offset.x + geo.loc.x,
-                        client.geom.y + offset.y + geo.loc.y,
-                    )
-                        .into();
-                    let popup_surf = render_elements_from_surface_tree(
-                        renderer,
-                        popup.wl_surface(),
-                        popup_loc.to_physical_precise_round(1.0),
-                        1.0,
-                        1.0,
-                        Kind::Unspecified,
-                    );
-                    popup_draws.push(popup_surf);
-                    popup_frame_surfaces.push(popup.wl_surface().clone());
-                }
-            }
-
-            let mut frame = renderer
-                .render(&mut framebuffer, size, Transform::Flipped180)
-                .map_err(|e| Error::Winit(format!("render: {e:?}")))?;
-            // Root window fill — close to classic dwm normbg.
-            frame
-                .clear(color::parse_hex(&state.config.norm_bg), &[damage])
-                .map_err(|e| Error::Winit(format!("clear: {e:?}")))?;
-            // dwm-style borders: solid frame under the client content.
-            for (rect, border_color, _, _) in &draws {
-                let phys = rect.to_physical_precise_round(1.0);
-                frame
-                    .clear(*border_color, &[phys])
-                    .map_err(|e| Error::Winit(format!("border: {e:?}")))?;
-            }
-            if let Some(bar) = &bar_element {
-                draw_render_elements(&mut frame, 1.0, &[bar], &[damage])
-                    .map_err(|e| Error::Winit(format!("bar: {e:?}")))?;
-            }
-            for (_, _, surf, clip) in &draws {
-                let clip_phys = clip.to_physical_precise_round(1.0);
-                draw_render_elements(&mut frame, 1.0, surf, &[clip_phys])
-                    .map_err(|e| Error::Winit(format!("draw: {e:?}")))?;
-            }
-            // xdg popups above all clients.
-            for surf in &popup_draws {
-                draw_render_elements(&mut frame, 1.0, surf, &[damage])
-                    .map_err(|e| Error::Winit(format!("popup: {e:?}")))?;
-            }
-            let _ = frame
-                .finish()
-                .map_err(|e| Error::Winit(format!("finish: {e:?}")))?;
-
-            for surface in state.xdg_shell_state.toplevel_surfaces() {
-                send_frames_surface_tree(
-                    surface.wl_surface(),
-                    start_time.elapsed().as_millis() as u32,
-                );
-            }
-            for surface in &popup_frame_surfaces {
-                send_frames_surface_tree(surface, start_time.elapsed().as_millis() as u32);
-            }
-            state.popups.cleanup();
+            let popup_surfaces = state
+                .render_gles_frame(renderer, &mut framebuffer, size, Transform::Flipped180)
+                .map_err(Error::Winit)?;
+            state.send_frames(start_time.elapsed().as_millis() as u32, &popup_surfaces);
 
             if let Some(stream) = listener.accept()? {
                 info!("client connected");
@@ -899,7 +937,7 @@ pub fn run() -> Result<(), Error> {
     }
 }
 
-fn send_frames_surface_tree(surface: &WlSurface, time: u32) {
+pub(crate) fn send_frames_surface_tree(surface: &WlSurface, time: u32) {
     with_surface_tree_downward(
         surface,
         (),
