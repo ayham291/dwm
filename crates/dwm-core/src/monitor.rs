@@ -217,8 +217,20 @@ impl Monitor {
         id
     }
 
+    /// Centered floating geometry that fits inside the window area.
+    pub fn scratch_float_geom(&self, prefer_w: i32, prefer_h: i32) -> Rect {
+        let margin = 24;
+        let max_w = (self.window_area.w - margin * 2).max(200);
+        let max_h = (self.window_area.h - margin * 2).max(120);
+        let fw = prefer_w.min(max_w).max(200);
+        let fh = prefer_h.min(max_h).max(120);
+        let fx = self.window_area.x + (self.window_area.w - fw).max(0) / 2;
+        let fy = self.window_area.y + (self.window_area.h - fh).max(0) / 2;
+        Rect::new(fx, fy, fw, fh)
+    }
+
     /// If title/app_id matches a scratchpad, retag + float + center it.
-    /// Returns `true` when a scratchpad rule applied.
+    /// Returns `true` when a scratchpad rule applied for the first time.
     pub fn apply_scratchpad_rule(&mut self, id: ClientId, title: &str, app_id: &str) -> bool {
         let title_l = title.to_lowercase();
         let app_l = app_id.to_lowercase();
@@ -229,15 +241,27 @@ impl Monitor {
             return false;
         };
         let tags = TagMask::scratch(index as u32);
-        let fw = sp.width;
-        let fh = sp.height;
-        let fx = self.window_area.x + (self.window_area.w - fw).max(0) / 2;
-        let fy = self.window_area.y + (self.window_area.h - fh).max(0) / 2;
+        let float_geom = self.scratch_float_geom(sp.width, sp.height);
+
+        // Already claimed as this pad — refresh metadata only. Do NOT re-union
+        // the scratch tag into the view (that would undo togglescratch hide).
+        if self.client(id).map(|c| c.tags == tags && c.floating).unwrap_or(false) {
+            if let Some(c) = self.client_mut(id) {
+                if !title.is_empty() {
+                    c.name = title.to_string();
+                }
+                if !app_id.is_empty() {
+                    c.app_id = app_id.to_string();
+                }
+            }
+            return false;
+        }
+
         if let Some(c) = self.client_mut(id) {
             c.tags = tags;
             c.floating = true;
-            c.float_geom = Rect::new(fx, fy, fw, fh);
-            c.geom = c.float_geom;
+            c.float_geom = float_geom;
+            c.geom = float_geom;
             if !title.is_empty() {
                 c.name = title.to_string();
             }
@@ -245,9 +269,8 @@ impl Monitor {
                 c.app_id = app_id.to_string();
             }
         }
-        // Ensure the scratch tag is visible so the pad shows up immediately.
-        let cur = self.tagset[self.seltags];
-        self.tagset[self.seltags] = cur.union(tags);
+        // First claim: show the pad immediately.
+        self.tagset_mut_union(tags);
         self.focus(Some(id));
         true
     }

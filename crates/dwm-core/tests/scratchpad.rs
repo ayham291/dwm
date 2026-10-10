@@ -52,6 +52,29 @@ fn scratchpad_rule_floats_and_centers() {
 }
 
 #[test]
+fn scratchpad_rule_does_not_unhide_on_repeat() {
+    let mut m = Monitor::from_config(&Config::default(), screen());
+    let id = m.manage(Client::new(ClientId(0), "pending"));
+    assert!(m.apply_scratchpad_rule(id, "spterm", "foot"));
+    // Hide via toggle.
+    m.apply(Command::ToggleScratch { index: 0 });
+    assert!(!m.tagset().contains(scratch_bit(0)));
+    // Title/commit sync must not force the pad visible again.
+    assert!(!m.apply_scratchpad_rule(id, "spterm", "foot"));
+    assert!(!m.tagset().contains(scratch_bit(0)));
+}
+
+#[test]
+fn scratch_float_geom_clamps_to_window() {
+    let m = Monitor::from_config(&Config::default(), Rect::new(0, 0, 800, 600));
+    let g = m.scratch_float_geom(960, 640);
+    assert!(g.w <= m.window_area.w);
+    assert!(g.h <= m.window_area.h);
+    assert!(g.x >= m.window_area.x);
+    assert!(g.y >= m.window_area.y);
+}
+
+#[test]
 fn normal_clients_do_not_inherit_scratch_tags() {
     let mut m = Monitor::from_config(&Config::default(), screen());
     m.apply(Command::ToggleScratch { index: 0 }); // view includes scratch bit

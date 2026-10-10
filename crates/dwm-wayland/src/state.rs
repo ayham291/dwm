@@ -192,8 +192,18 @@ impl DwmState {
         if let Some(argv) = frame.spawn {
             if let Some(index) = pending {
                 self.pending_scratch = Some(index);
+                info!("scratchpad {index}: spawning, pending claim");
             }
             spawn_argv(&argv);
+        } else if let Some(index) = pending {
+            let shown = self
+                .monitor
+                .tagset()
+                .contains(dwm_core::TagMask::scratch(index as u32));
+            info!(
+                "scratchpad {index}: toggled {}",
+                if shown { "shown" } else { "hidden" }
+            );
         }
         self.push_configures(&frame.geometries);
         if let Some(focus) = frame.focused {
@@ -342,23 +352,18 @@ impl XdgShellHandler for DwmState {
             // Force scratchpad role immediately (title may arrive later).
             if let Some(sp) = self.monitor.scratchpads.get(index).cloned() {
                 let tags = dwm_core::TagMask::scratch(index as u32);
-                let fw = sp.width;
-                let fh = sp.height;
-                let fx = self.monitor.window_area.x
-                    + (self.monitor.window_area.w - fw).max(0) / 2;
-                let fy = self.monitor.window_area.y
-                    + (self.monitor.window_area.h - fh).max(0) / 2;
+                let geom = self.monitor.scratch_float_geom(sp.width, sp.height);
                 if let Some(c) = self.monitor.client_mut(id) {
                     c.tags = tags;
                     c.floating = true;
                     c.name = sp.name.clone();
-                    c.float_geom = dwm_core::Rect::new(fx, fy, fw, fh);
-                    c.geom = c.float_geom;
+                    c.float_geom = geom;
+                    c.geom = geom;
                 }
                 self.monitor.tagset_mut_union(tags);
                 info!(
                     "claimed scratchpad index={index} client={id:?} geom={}x{}+{}+{}",
-                    fw, fh, fx, fy
+                    geom.w, geom.h, geom.x, geom.y
                 );
             }
         }
