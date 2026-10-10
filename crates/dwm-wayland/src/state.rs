@@ -32,23 +32,29 @@ use smithay::wayland::selection::data_device::{
     ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
 };
 use smithay::wayland::selection::SelectionHandler;
+use smithay::wayland::shell::kde::decoration::{KdeDecorationHandler, KdeDecorationState};
+use smithay::wayland::shell::xdg::decoration::{XdgDecorationHandler, XdgDecorationState};
 use smithay::wayland::shell::xdg::{
     PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
 };
 use smithay::wayland::shm::{ShmHandler, ShmState};
 use smithay::{
-    delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm,
-    delegate_xdg_shell,
+    delegate_compositor, delegate_data_device, delegate_kde_decoration, delegate_output,
+    delegate_seat, delegate_shm, delegate_xdg_decoration, delegate_xdg_shell,
 };
 use tracing::{info, warn};
+use wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as XdgDecoMode;
 use wayland_protocols::xdg::shell::server::xdg_toplevel;
+use wayland_protocols_misc::server_decoration::server::org_kde_kwin_server_decoration::Mode as KdeDecoMode;
+use wayland_protocols_misc::server_decoration::server::org_kde_kwin_server_decoration_manager::Mode as KdeDecoDefaultMode;
 use wayland_server::backend::{ClientData, ClientId as WlClientId, DisconnectReason};
 use wayland_server::protocol::wl_buffer;
 use wayland_server::protocol::wl_surface::WlSurface;
-use wayland_server::{Client, DisplayHandle, ListeningSocket, Resource};
+use wayland_server::{Client, DisplayHandle, ListeningSocket, Resource, WEnum};
 use winit::platform::pump_events::PumpStatus;
 
 use crate::bindings::{self, Cmd};
+use crate::color;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -65,6 +71,8 @@ pub enum Error {
 struct DwmState {
     compositor_state: CompositorState,
     xdg_shell_state: XdgShellState,
+    _xdg_decoration_state: XdgDecorationState,
+    kde_decoration_state: KdeDecorationState,
     shm_state: ShmState,
     seat_state: SeatState<Self>,
     data_device_state: DataDeviceState,
@@ -118,6 +126,8 @@ impl DwmState {
         Self {
             compositor_state: CompositorState::new::<Self>(dh),
             xdg_shell_state: XdgShellState::new::<Self>(dh),
+            _xdg_decoration_state: XdgDecorationState::new::<Self>(dh),
+            kde_decoration_state: KdeDecorationState::new::<Self>(dh, KdeDecoDefaultMode::Server),
             shm_state: ShmState::new::<Self>(dh, vec![]),
             seat_state,
             data_device_state: DataDeviceState::new::<Self>(dh),
@@ -246,6 +256,11 @@ impl XdgShellHandler for DwmState {
             .insert(surface.wl_surface().id().protocol_id(), id);
         self.toplevels.insert(id, surface.clone());
 
+        // dwm draws borders itself — ask clients not to use CSD title bars.
+        surface.with_pending_state(|state| {
+            state.decoration_mode = Some(XdgDecoMode::ServerSide);
+        });
+
         let (geoms, symbol) = self.monitor.arrange();
         self.layout_symbol = symbol;
         self.push_configures(&geoms);
@@ -337,7 +352,56 @@ impl SeatHandler for DwmState {
 
 impl OutputHandler for DwmState {}
 
+impl XdgDecorationHandler for DwmState {
+    fn new_decoration(&mut self, toplevel: ToplevelSurface) {
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(XdgDecoMode::ServerSide);
+        });
+        toplevel.send_configure();
+    }
+
+    fn request_mode(&mut self, toplevel: ToplevelSurface, _mode: XdgDecoMode) {
+        // Always server-side: compositor draws dwm borders, never client title bars.
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(XdgDecoMode::ServerSide);
+        });
+        toplevel.send_configure();
+    }
+
+    fn unset_mode(&mut self, toplevel: ToplevelSurface) {
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(XdgDecoMode::ServerSide);
+        });
+        toplevel.send_configure();
+    }
+}
+
+impl KdeDecorationHandler for DwmState {
+    fn kde_decoration_state(&self) -> &KdeDecorationState {
+        &self.kde_decoration_state
+    }
+
+    fn new_decoration(
+        &mut self,
+        _surface: &WlSurface,
+        decoration: &wayland_protocols_misc::server_decoration::server::org_kde_kwin_server_decoration::OrgKdeKwinServerDecoration,
+    ) {
+        decoration.mode(KdeDecoMode::Server);
+    }
+
+    fn request_mode(
+        &mut self,
+        _surface: &WlSurface,
+        decoration: &wayland_protocols_misc::server_decoration::server::org_kde_kwin_server_decoration::OrgKdeKwinServerDecoration,
+        _mode: WEnum<KdeDecoMode>,
+    ) {
+        decoration.mode(KdeDecoMode::Server);
+    }
+}
+
 delegate_xdg_shell!(DwmState);
+delegate_xdg_decoration!(DwmState);
+delegate_kde_decoration!(DwmState);
 delegate_compositor!(DwmState);
 delegate_shm!(DwmState);
 delegate_seat!(DwmState);
@@ -398,8 +462,12 @@ pub fn run() -> Result<(), Error> {
     })?;
     info!("listening on WAYLAND_DISPLAY={socket_name}");
 
-    let (mut backend, mut winit_loop) = winit_backend::init::<GlesRenderer>()
-        .map_err(|e| Error::Winit(format!("{e:?}")))?;
+    let (mut backend, mut winit_loop) = winit_backend::init_from_attributes::<GlesRenderer>(
+        winit::window::Window::default_attributes()
+            .with_title("dwm-wayland")
+            .with_visible(true),
+    )
+    .map_err(|e| Error::Winit(format!("{e:?}")))?;
 
     let size = backend.window_size();
     let screen = Rect::new(0, 0, size.w, size.h);
@@ -476,13 +544,32 @@ pub fn run() -> Result<(), Error> {
 
             let mut elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
             let tagset = state.monitor.tagset();
+            let bw = state.config.border_px as i32;
+            let sel_border = color::parse_hex(&state.config.sel_border);
+            let norm_border = color::parse_hex(&state.config.norm_border);
+            let focused = state.monitor.sel;
+
+            // Collect border frames (outer rect including border) then content.
+            let mut border_rects: Vec<(Rectangle<i32, Logical>, Color32F)> = Vec::new();
             for client in state.monitor.visible_clients() {
                 let Some(toplevel) = state.toplevels.get(&client.id) else {
                     continue;
                 };
-                if !client.is_visible(tagset) {
+                if !client.is_visible(tagset) || client.geom.w <= 0 || client.geom.h <= 0 {
                     continue;
                 }
+                let border_color = if focused == Some(client.id) {
+                    sel_border
+                } else {
+                    norm_border
+                };
+                // Layout sizes already subtract 2*border; paint the rim outside the content.
+                let outer = Rectangle::new(
+                    (client.geom.x - bw, client.geom.y - bw).into(),
+                    (client.geom.w + 2 * bw, client.geom.h + 2 * bw).into(),
+                );
+                border_rects.push((outer, border_color));
+
                 let loc: Point<i32, Logical> = (client.geom.x, client.geom.y).into();
                 elements.extend(render_elements_from_surface_tree(
                     renderer,
@@ -497,9 +584,17 @@ pub fn run() -> Result<(), Error> {
             let mut frame = renderer
                 .render(&mut framebuffer, size, Transform::Flipped180)
                 .map_err(|e| Error::Winit(format!("render: {e:?}")))?;
+            // Root window fill — close to classic dwm normbg.
             frame
-                .clear(Color32F::new(0.12, 0.12, 0.12, 1.0), &[damage])
+                .clear(color::parse_hex(&state.config.norm_bg), &[damage])
                 .map_err(|e| Error::Winit(format!("clear: {e:?}")))?;
+            // dwm-style borders: solid frame under the client content.
+            for (rect, border_color) in &border_rects {
+                let phys = rect.to_physical_precise_round(1.0);
+                frame
+                    .clear(*border_color, &[phys])
+                    .map_err(|e| Error::Winit(format!("border: {e:?}")))?;
+            }
             draw_render_elements(&mut frame, 1.0, &elements, &[damage])
                 .map_err(|e| Error::Winit(format!("draw: {e:?}")))?;
             let _ = frame

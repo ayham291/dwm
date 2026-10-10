@@ -17,6 +17,7 @@ tracing-subscriber = { workspace = true }
 thiserror = "1"
 wayland-server = "0.31.9"
 wayland-protocols = { version = "0.32.8", features = ["server", "staging", "unstable"] }
+wayland-protocols-misc = { version = "0.3.8", features = ["server"] }
 
 [dependencies.winit]
 version = "0.30"

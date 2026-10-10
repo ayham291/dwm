@@ -7,6 +7,10 @@ lives in a pure library crate so it can be tested without a GPU. The compositor
 binary uses [smithay](https://github.com/Smithay/smithay) for the Wayland frontend
 and the winit backend for nested sessions.
 
+Clients are asked for **server-side decorations** (no CSD title bars / close
+buttons). Chrome is classic dwm: a colored border (`selborder` / `normborder`)
+around each tiled window.
+
 The original X11 C sources are preserved under [`legacy/`](legacy/).
 
 ## Crates

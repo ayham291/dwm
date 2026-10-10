@@ -16,6 +16,7 @@
 //! ```
 
 mod bindings;
+mod color;
 mod state;
 
 use std::env;
