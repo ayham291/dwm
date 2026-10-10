@@ -72,11 +72,14 @@ struct UdevLoopState {
     primary_crtc: Option<crtc::Handle>,
 }
 
+#[cfg(feature = "xwayland")]
+crate::forward_xwayland_to_dwm!(UdevLoopState);
+
 /// Run the DRM/libseat session compositor until quit or a fatal backend error.
 pub fn run() -> Result<(), Error> {
     info!("udev backend: starting DRM/libseat/libinput session");
 
-    let mut event_loop: EventLoop<UdevLoopState> =
+    let mut event_loop: EventLoop<'static, UdevLoopState> =
         EventLoop::try_new().map_err(|e| Error::Other(format!("event loop: {e}")))?;
     let display: Display<DwmState> = Display::new()?;
     let dh = display.handle();
@@ -273,6 +276,15 @@ pub fn run() -> Result<(), Error> {
             TimeoutAction::ToDuration(Duration::from_millis(16))
         })
         .map_err(|e| Error::Other(format!("render timer: {e}")))?;
+
+    #[cfg(feature = "xwayland")]
+    {
+        let handle = event_loop.handle();
+        crate::xwayland::spawn_xwayland(handle, &dh, |state, wm, display_number| {
+            crate::xwayland::on_ready_store_on_dwm(&mut state.dwm, wm, display_number);
+        })
+        .map_err(Error::Other)?;
+    }
 
     if std::env::var_os("DWM_WAYLAND_NO_AUTOSTART").is_none() {
         let term = loop_state.dwm.config.terminal.clone();

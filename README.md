@@ -18,7 +18,7 @@ The original X11 C sources are preserved under [`legacy/`](legacy/).
 | Crate | Role |
 |-------|------|
 | `dwm-core` | Pure WM state machine + layout algorithms |
-| `dwm-wayland` | Wayland compositor (`smithay` + winit) |
+| `dwm-wayland` | Wayland compositor (`smithay` + winit / optional DRM session) |
 
 ## Configuration
 
@@ -57,18 +57,18 @@ Path defaults to `$XDG_RUNTIME_DIR/dwm-wayland.status` (see `Config::status_file
 ```bash
 # System deps (Debian/Ubuntu) — nested (winit) path
 sudo apt install pkg-config libwayland-dev wayland-protocols \
-  libxkbcommon-dev libxkbcommon-x11-0 libegl1-mesa-dev
+  libxkbcommon-dev libxkbcommon-x11-0 libegl1-mesa-dev xwayland
 
 # Extra deps for TTY session backend (`--session`, cargo feature `session`)
 sudo apt install libseat-dev libinput-dev libgbm-dev libdrm-dev \
-  libudev-dev xwayland
+  libudev-dev
 
 # Nested sessions also need a writable XDG_RUNTIME_DIR
 export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/tmp/runtime-$USER}
 mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
 
 cargo build --release
-# Nested-only binary (no libseat/DRM):
+# Nested-only binary (no libseat/DRM, no XWayland):
 cargo build -p dwm-wayland --no-default-features --release
 ```
 
@@ -81,18 +81,41 @@ cargo run -p dwm-wayland -- --check   # protocol + core smoke test (no GPU loop)
 
 ## Run nested (default / recommended for development)
 
-Under an existing X11 or Wayland session (winit window):
+Under an existing X11 or Wayland session (winit window). The nested path runs on a
+**calloop** event loop (`ListeningSocketSource` + winit source), same shape as
+smithay’s smallvil example:
 
 ```bash
-# Default features include `session`, but omitting `--session` still uses winit:
+# Default features include `session` + `xwayland`, but omitting `--session` still uses winit:
 cargo run -p dwm-wayland
-# Explicit nested-only build:
+# Explicit nested-only build (no XWayland / session):
 cargo run -p dwm-wayland --no-default-features
 # or
 ./target/release/dwm-wayland
 ```
 
 Set `DWM_WAYLAND_NO_AUTOSTART=1` to skip spawning the default terminal.
+
+## XWayland
+
+Enabled by the default cargo feature `xwayland` (needs `Xwayland` on `PATH`).
+
+On both the nested (winit) and `--session` (udev) paths the compositor:
+
+1. Spawns XWayland via smithay’s `XWayland::spawn` and inserts it into calloop
+2. On `Ready`, starts `X11Wm` and sets `DISPLAY=:<n>` for child processes
+3. Maps X11 windows into `dwm-core` clients (tile/float/fullscreen via arrange)
+4. Implements minimal `XwmHandler` + `XWaylandShellHandler`
+
+Disable with `--no-default-features` or by building without the `xwayland` feature.
+
+```bash
+# X11 app under nested compositor (after dwm-wayland is running with xwayland):
+DISPLAY=:0 xterm   # use the DISPLAY value logged at "XWayland ready"
+```
+
+Clipboard bridging between X11 and Wayland selections is not fully wired yet
+(selection access defaults to deny).
 
 ## Run on a TTY (`--session`) — experimental
 
@@ -107,7 +130,7 @@ DWM_WAYLAND_DRM_DEVICE=/dev/dri/card0 cargo run -p dwm-wayland -- --session
 
 Requirements: a working seat (seatd or systemd-logind), `/dev/dri`, and at least one connected display. If `LibSeatSession` or DRM open fails, the process exits with an error (it does not fall back to winit).
 
-**Status:** single-GPU / first-connector modeset, libinput, session pause/resume, and a clear+client render loop are wired. Multi-output layout, DRM leasing, dmabuf feedback, and polished VT switching are still gaps — do not treat this as a daily driver yet.
+**Status:** single-GPU / first-connector modeset, libinput, session pause/resume, XWayland (with feature), and a clear+client render loop are wired. Multi-output layout, DRM leasing, dmabuf feedback on the session path, and polished VT switching are still gaps — do not treat this as a daily driver yet.
 
 ### Key bindings (Super / Mod4, or Alt in nested sessions)
 
@@ -140,6 +163,32 @@ Host window managers often grab Super; nested runs also accept **Alt** as the mo
 Ported from the vanitygaps-patched build in `legacy/`:
 
 `[]=` tile · `TTT` bstack · `[@]` spiral · `[\]` dwindle · `[D]` deck · `[M]` monocle · `|M|` centeredmaster · `>M>` centeredfloatingmaster · `><>` floating
+
+## Production readiness
+
+Honest status versus replacing X11 dwm as a daily driver:
+
+### Works today
+
+- Nested winit session on a calloop loop (socket + display + winit sources)
+- dwm-core tiling: tags, layouts, vanity gaps, stacker, sticky, floating, fullscreen
+- Server-side decorations / colored borders, status bar, scratchpads
+- Pointer focus-follows-mouse, Mod+mouse move/resize, keyboard bindings
+- xdg-shell toplevels + popups, wl_shm, data-device + primary selection globals
+- linux-dmabuf v3 global on the winit path (formats from GlesRenderer)
+- XWayland spawn + X11Wm mapping into dwm clients (`DISPLAY` set on Ready) — nested and session
+- Experimental DRM/libseat/libinput TTY session (`--session`)
+
+### Remaining gaps (not a drop-in X11 dwm yet)
+
+- Multi-monitor / per-output tags and layout
+- X11↔Wayland clipboard/primary bridging and drag-and-drop polish
+- Layer-shell (panels, on-screen keyboards), idle/inhibit, gamma/color management
+- Session path: multi-GPU, dmabuf feedback / scanout plane, DRM leasing, robust VT switch
+- Config is still recompile-time (no runtime `config.h` reload / IPC beyond the status file)
+- Crash recovery, screenshot/screencopy portals, security-context / sandboxed clients
+- Popup seat grabs, tablet/touch, gesture bindings
+- Packaging / display-manager session files for `--session`
 
 ## Legacy X11 dwm
 

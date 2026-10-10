@@ -278,30 +278,32 @@ impl DwmState {
         use smithay::desktop::PopupManager;
 
         let id = self.client_at(pos)?;
-        let toplevel = self.toplevels.get(&id)?;
+        let wl_surface = self.wl_surface_for_client(id)?;
         let c = self.monitor.client(id)?;
         let win_loc = (c.geom.x as f64, c.geom.y as f64);
         let relative = Point::from((pos.x - win_loc.0, pos.y - win_loc.1));
 
-        // Prefer popups belonging to this toplevel.
-        for (popup, popup_offset) in PopupManager::popups_for_surface(toplevel.wl_surface()) {
-            let geo = popup.geometry();
-            let origin: Point<f64, Logical> = Point::from((
-                win_loc.0 + popup_offset.x as f64 + geo.loc.x as f64,
-                win_loc.1 + popup_offset.y as f64 + geo.loc.y as f64,
-            ));
-            if pos.x >= origin.x
-                && pos.y >= origin.y
-                && pos.x < origin.x + geo.size.w as f64
-                && pos.y < origin.y + geo.size.h as f64
-            {
-                return Some((
-                    popup.wl_surface().clone(),
-                    (pos.x - origin.x, pos.y - origin.y).into(),
+        // Prefer popups belonging to xdg toplevels.
+        if self.toplevels.contains_key(&id) {
+            for (popup, popup_offset) in PopupManager::popups_for_surface(&wl_surface) {
+                let geo = popup.geometry();
+                let origin: Point<f64, Logical> = Point::from((
+                    win_loc.0 + popup_offset.x as f64 + geo.loc.x as f64,
+                    win_loc.1 + popup_offset.y as f64 + geo.loc.y as f64,
                 ));
+                if pos.x >= origin.x
+                    && pos.y >= origin.y
+                    && pos.x < origin.x + geo.size.w as f64
+                    && pos.y < origin.y + geo.size.h as f64
+                {
+                    return Some((
+                        popup.wl_surface().clone(),
+                        (pos.x - origin.x, pos.y - origin.y).into(),
+                    ));
+                }
             }
         }
 
-        Some((toplevel.wl_surface().clone(), relative))
+        Some((wl_surface, relative))
     }
 }

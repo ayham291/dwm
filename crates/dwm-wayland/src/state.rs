@@ -6,21 +6,22 @@ use std::process::Command as ProcCommand;
 use std::sync::Arc;
 use std::time::Instant;
 
+use calloop::generic::Generic;
+use calloop::{EventLoop, Interest, LoopSignal, Mode as CalloopMode, PostAction};
 use dwm_core::{Client as DwmClient, ClientId, Command, Config, Monitor, Rect};
+use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::renderer::element::surface::{
     render_elements_from_surface_tree, WaylandSurfaceRenderElement,
 };
 use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::gles::{GlesRenderer, GlesTarget};
 use smithay::backend::renderer::utils::{draw_render_elements, on_commit_buffer_handler};
-use smithay::backend::renderer::{Color32F, Frame, Renderer};
+use smithay::backend::renderer::{Color32F, Frame, ImportDma, ImportMemWl, Renderer};
 use smithay::backend::winit::{self as winit_backend, WinitEvent};
 use smithay::desktop::{find_popup_root_surface, PopupKind, PopupManager};
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::output::{Mode as OutputMode, Output, PhysicalProperties, Scale, Subpixel};
-use smithay::reexports::wayland_server::protocol::{wl_output, wl_seat};
-#[cfg(feature = "session")]
-use smithay::reexports::wayland_server::protocol::wl_shm;
+use smithay::reexports::wayland_server::protocol::{wl_output, wl_seat, wl_shm};
 use smithay::reexports::wayland_server::Display;
 use smithay::utils::{Logical, Physical, Point, Rectangle, Serial, Size, Transform};
 use smithay::wayland::buffer::BufferHandler;
@@ -28,6 +29,7 @@ use smithay::wayland::compositor::{
     with_surface_tree_downward, CompositorClientState, CompositorHandler, CompositorState,
     SurfaceAttributes, TraversalAction,
 };
+use smithay::wayland::dmabuf::{DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier};
 use smithay::wayland::output::{OutputHandler, OutputManagerState};
 use smithay::wayland::selection::data_device::{
     ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
@@ -42,12 +44,17 @@ use smithay::wayland::shell::xdg::{
     PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
 };
 use smithay::wayland::shm::{ShmHandler, ShmState};
+use smithay::wayland::socket::ListeningSocketSource;
+#[cfg(feature = "xwayland")]
+use smithay::wayland::xwayland_shell::XWaylandShellState;
+#[cfg(feature = "xwayland")]
+use smithay::xwayland::{X11Surface, X11Wm, XWaylandClientData};
 use smithay::{
-    delegate_compositor, delegate_data_device, delegate_kde_decoration, delegate_output,
-    delegate_primary_selection, delegate_seat, delegate_shm, delegate_xdg_decoration,
-    delegate_xdg_shell,
+    delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_kde_decoration,
+    delegate_output, delegate_primary_selection, delegate_seat, delegate_shm,
+    delegate_xdg_decoration, delegate_xdg_shell,
 };
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as XdgDecoMode;
 use wayland_protocols::xdg::shell::server::xdg_toplevel;
 use wayland_protocols_misc::server_decoration::server::org_kde_kwin_server_decoration::Mode as KdeDecoMode;
@@ -55,8 +62,7 @@ use wayland_protocols_misc::server_decoration::server::org_kde_kwin_server_decor
 use wayland_server::backend::{ClientData, ClientId as WlClientId, DisconnectReason};
 use wayland_server::protocol::wl_buffer;
 use wayland_server::protocol::wl_surface::WlSurface;
-use wayland_server::{Client, DisplayHandle, ListeningSocket, Resource, WEnum};
-use winit::platform::pump_events::PumpStatus;
+use wayland_server::{Client, DisplayHandle, Resource, WEnum};
 
 use crate::bar::StatusBar;
 use crate::bindings;
@@ -86,6 +92,8 @@ pub struct DwmState {
     _output_manager_state: OutputManagerState,
     pub(crate) seat: Seat<Self>,
     output: Output,
+    pub(crate) display_handle: DisplayHandle,
+    pub(crate) loop_signal: Option<LoopSignal>,
 
     pub monitor: Monitor,
     pub config: Config,
@@ -94,7 +102,7 @@ pub struct DwmState {
     /// Map dwm ClientId → xdg toplevel.
     pub toplevels: HashMap<ClientId, ToplevelSurface>,
     /// Map wl_surface id → ClientId for commit lookups.
-    surface_clients: HashMap<u32, ClientId>,
+    pub(crate) surface_clients: HashMap<u32, ClientId>,
 
     should_quit: bool,
     pub layout_symbol: String,
@@ -105,6 +113,19 @@ pub struct DwmState {
     last_status_read: Instant,
     /// Scratchpad index waiting to claim the next new toplevel.
     pending_scratch: Option<usize>,
+
+    /// linux-dmabuf global state (formats filled when a GLES renderer is available).
+    dmabuf_state: DmabufState,
+    _dmabuf_global: Option<DmabufGlobal>,
+
+    #[cfg(feature = "xwayland")]
+    pub(crate) xwayland_shell_state: XWaylandShellState,
+    #[cfg(feature = "xwayland")]
+    pub(crate) xwm: Option<X11Wm>,
+    #[cfg(feature = "xwayland")]
+    pub(crate) xdisplay: Option<u32>,
+    #[cfg(feature = "xwayland")]
+    pub(crate) x11_surfaces: HashMap<ClientId, X11Surface>,
 }
 
 impl DwmState {
@@ -160,6 +181,8 @@ impl DwmState {
             _output_manager_state: output_manager_state,
             seat,
             output,
+            display_handle: dh.clone(),
+            loop_signal: None,
             status_path: config.status_file.clone(),
             monitor: Monitor::from_config(&config, screen),
             config,
@@ -173,20 +196,47 @@ impl DwmState {
             status_bar: StatusBar::new(),
             last_status_read: Instant::now(),
             pending_scratch: None,
+            dmabuf_state: DmabufState::new(),
+            _dmabuf_global: None,
+            #[cfg(feature = "xwayland")]
+            xwayland_shell_state: XWaylandShellState::new::<Self>(dh),
+            #[cfg(feature = "xwayland")]
+            xwm: None,
+            #[cfg(feature = "xwayland")]
+            xdisplay: None,
+            #[cfg(feature = "xwayland")]
+            x11_surfaces: HashMap::new(),
         }
     }
 
-    #[cfg(feature = "session")]
     pub(crate) fn should_quit(&self) -> bool {
         self.should_quit
     }
 
-    #[cfg(feature = "session")]
+    pub(crate) fn request_quit(&mut self) {
+        self.should_quit = true;
+        if let Some(sig) = &self.loop_signal {
+            sig.stop();
+        }
+    }
+
     pub(crate) fn update_shm_formats(
         &mut self,
         formats: impl IntoIterator<Item = wl_shm::Format>,
     ) {
         self.shm_state.update_formats(formats);
+    }
+
+    pub(crate) fn init_dmabuf_global(
+        &mut self,
+        dh: &DisplayHandle,
+        formats: impl IntoIterator<Item = smithay::backend::allocator::Format>,
+    ) {
+        let global = self
+            .dmabuf_state
+            .create_global::<Self>(dh, formats.into_iter().collect::<Vec<_>>());
+        self._dmabuf_global = Some(global);
+        info!("linux-dmabuf global created");
     }
 
     pub(crate) fn refresh_status(&mut self) {
@@ -237,12 +287,12 @@ impl DwmState {
         let mut popup_draws: Vec<Vec<WaylandSurfaceRenderElement<GlesRenderer>>> = Vec::new();
         let mut popup_frame_surfaces: Vec<WlSurface> = Vec::new();
         for client in visible {
-            let Some(toplevel) = self.toplevels.get(&client.id) else {
-                continue;
-            };
             if !client.is_visible(tagset) {
                 continue;
             }
+            let Some(wl_surface) = self.wl_surface_for_client(client.id) else {
+                continue;
+            };
             let border_color = if focused == Some(client.id) {
                 sel_border
             } else {
@@ -259,7 +309,7 @@ impl DwmState {
             let loc: Point<i32, Logical> = (client.geom.x, client.geom.y).into();
             let surf = render_elements_from_surface_tree(
                 renderer,
-                toplevel.wl_surface(),
+                &wl_surface,
                 loc.to_physical_precise_round(1.0),
                 1.0,
                 1.0,
@@ -267,23 +317,25 @@ impl DwmState {
             );
             draws.push((outer, border_color, surf, clip));
 
-            for (popup, offset) in PopupManager::popups_for_surface(toplevel.wl_surface()) {
-                let geo = popup.geometry();
-                let popup_loc: Point<i32, Logical> = (
-                    client.geom.x + offset.x + geo.loc.x,
-                    client.geom.y + offset.y + geo.loc.y,
-                )
-                    .into();
-                let popup_surf = render_elements_from_surface_tree(
-                    renderer,
-                    popup.wl_surface(),
-                    popup_loc.to_physical_precise_round(1.0),
-                    1.0,
-                    1.0,
-                    Kind::Unspecified,
-                );
-                popup_draws.push(popup_surf);
-                popup_frame_surfaces.push(popup.wl_surface().clone());
+            if self.toplevels.contains_key(&client.id) {
+                for (popup, offset) in PopupManager::popups_for_surface(&wl_surface) {
+                    let geo = popup.geometry();
+                    let popup_loc: Point<i32, Logical> = (
+                        client.geom.x + offset.x + geo.loc.x,
+                        client.geom.y + offset.y + geo.loc.y,
+                    )
+                        .into();
+                    let popup_surf = render_elements_from_surface_tree(
+                        renderer,
+                        popup.wl_surface(),
+                        popup_loc.to_physical_precise_round(1.0),
+                        1.0,
+                        1.0,
+                        Kind::Unspecified,
+                    );
+                    popup_draws.push(popup_surf);
+                    popup_frame_surfaces.push(popup.wl_surface().clone());
+                }
             }
         }
 
@@ -321,10 +373,27 @@ impl DwmState {
         for surface in self.xdg_shell_state.toplevel_surfaces() {
             send_frames_surface_tree(surface.wl_surface(), time);
         }
+        #[cfg(feature = "xwayland")]
+        for x11 in self.x11_surfaces.values() {
+            if let Some(surf) = x11.wl_surface() {
+                send_frames_surface_tree(&surf, time);
+            }
+        }
         for surface in popup_surfaces {
             send_frames_surface_tree(surface, time);
         }
         self.popups.cleanup();
+    }
+
+    pub(crate) fn wl_surface_for_client(&self, id: ClientId) -> Option<WlSurface> {
+        if let Some(toplevel) = self.toplevels.get(&id) {
+            return Some(toplevel.wl_surface().clone());
+        }
+        #[cfg(feature = "xwayland")]
+        if let Some(x11) = self.x11_surfaces.get(&id) {
+            return x11.wl_surface();
+        }
+        None
     }
 
     /// Re-run the layout engine and push configures to all mapped clients.
@@ -367,6 +436,12 @@ impl DwmState {
         if let Some(id) = frame.kill {
             if let Some(toplevel) = self.toplevels.get(&id) {
                 toplevel.send_close();
+            }
+            #[cfg(feature = "xwayland")]
+            if let Some(x11) = self.x11_surfaces.get(&id) {
+                if let Err(err) = x11.close() {
+                    warn!("X11 close: {err:?}");
+                }
             }
         }
         if let Some(argv) = frame.spawn {
@@ -440,6 +515,28 @@ impl DwmState {
 
     pub(crate) fn push_configures(&mut self, geometries: &[(ClientId, Rect)]) {
         for (id, rect) in geometries {
+            let activated = self.monitor.sel == Some(*id);
+            let fullscreen = self
+                .monitor
+                .client(*id)
+                .map(|c| c.fullscreen)
+                .unwrap_or(false);
+
+            #[cfg(feature = "xwayland")]
+            if let Some(x11) = self.x11_surfaces.get(id) {
+                if rect.w <= 0 || rect.h <= 0 {
+                    let _ = x11.set_mapped(false);
+                    continue;
+                }
+                let geo = Rectangle::new((rect.x, rect.y).into(), (rect.w, rect.h).into());
+                if let Err(err) = x11.configure(geo) {
+                    warn!("X11 configure: {err:?}");
+                }
+                let _ = x11.set_activated(activated);
+                let _ = x11.set_fullscreen(fullscreen);
+                continue;
+            }
+
             let Some(toplevel) = self.toplevels.get(id) else {
                 continue;
             };
@@ -452,12 +549,6 @@ impl DwmState {
                 continue;
             }
             let size = Size::<i32, Logical>::from((rect.w, rect.h));
-            let activated = self.monitor.sel == Some(*id);
-            let fullscreen = self
-                .monitor
-                .client(*id)
-                .map(|c| c.fullscreen)
-                .unwrap_or(false);
             toplevel.with_pending_state(|state| {
                 state.size = Some(size);
                 if activated {
@@ -476,8 +567,7 @@ impl DwmState {
     }
 
     pub(crate) fn focus_client(&mut self, id: ClientId) {
-        if let Some(toplevel) = self.toplevels.get(&id) {
-            let surface = toplevel.wl_surface().clone();
+        if let Some(surface) = self.wl_surface_for_client(id) {
             if let Some(keyboard) = self.seat.get_keyboard() {
                 keyboard.set_focus(self, Some(surface), Serial::from(0));
             }
@@ -525,6 +615,23 @@ fn spawn_argv(argv: &[String]) {
 
 impl BufferHandler for DwmState {
     fn buffer_destroyed(&mut self, _buffer: &wl_buffer::WlBuffer) {}
+}
+
+impl DmabufHandler for DwmState {
+    fn dmabuf_state(&mut self) -> &mut DmabufState {
+        &mut self.dmabuf_state
+    }
+
+    fn dmabuf_imported(
+        &mut self,
+        _global: &DmabufGlobal,
+        _dmabuf: Dmabuf,
+        notifier: ImportNotifier,
+    ) {
+        // Formats were advertised from GlesRenderer at global creation time.
+        // Actual GPU import happens via ImportDma when the buffer is used to render.
+        let _ = notifier.successful::<Self>();
+    }
 }
 
 impl XdgShellHandler for DwmState {
@@ -688,6 +795,10 @@ impl CompositorHandler for DwmState {
     }
 
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
+        #[cfg(feature = "xwayland")]
+        if let Some(state) = client.get_data::<XWaylandClientData>() {
+            return &state.compositor_state;
+        }
         &client.get_data::<ClientState>().unwrap().compositor_state
     }
 
@@ -796,6 +907,7 @@ delegate_seat!(DwmState);
 delegate_data_device!(DwmState);
 delegate_primary_selection!(DwmState);
 delegate_output!(DwmState);
+delegate_dmabuf!(DwmState);
 
 #[derive(Default)]
 pub(crate) struct ClientState {
@@ -839,19 +951,49 @@ pub fn check_protocols() -> Result<String, Error> {
 }
 
 pub fn run() -> Result<(), Error> {
-    let mut display: Display<DwmState> = Display::new()?;
+    let mut event_loop: EventLoop<'static, DwmState> = EventLoop::try_new()
+        .map_err(|e| Error::Other(format!("event loop: {e}")))?;
+    let display: Display<DwmState> = Display::new()?;
     let dh = display.handle();
 
-    let socket_name = unique_socket_name();
-    let listener = ListeningSocket::bind(&socket_name).map_err(|e| {
-        Error::Io(std::io::Error::new(
-            std::io::ErrorKind::AddrInUse,
-            format!("bind {socket_name}: {e}"),
-        ))
-    })?;
+    let socket = ListeningSocketSource::with_name(&unique_socket_name())
+        .or_else(|_| ListeningSocketSource::new_auto())
+        .map_err(|e| Error::Other(format!("wayland socket: {e:?}")))?;
+    let socket_name = socket.socket_name().to_string_lossy().into_owned();
     info!("listening on WAYLAND_DISPLAY={socket_name}");
+    std::env::set_var("WAYLAND_DISPLAY", &socket_name);
 
-    let (mut backend, mut winit_loop) = winit_backend::init_from_attributes::<GlesRenderer>(
+    event_loop
+        .handle()
+        .insert_source(socket, |client_stream, _, state| {
+            if let Err(err) = state
+                .display_handle
+                .insert_client(client_stream, Arc::new(ClientState::default()))
+            {
+                warn!("failed to insert wayland client: {err}");
+            } else {
+                info!("client connected");
+            }
+        })
+        .map_err(|e| Error::Other(format!("socket source: {e}")))?;
+
+    event_loop
+        .handle()
+        .insert_source(
+            Generic::new(display, Interest::READ, CalloopMode::Level),
+            |_, display, state| {
+                // SAFETY: display is owned by the event source for the loop lifetime.
+                unsafe {
+                    if let Err(err) = display.get_mut().dispatch_clients(state) {
+                        error!("dispatch_clients: {err}");
+                    }
+                }
+                Ok(PostAction::Continue)
+            },
+        )
+        .map_err(|e| Error::Other(format!("display source: {e}")))?;
+
+    let (mut backend, winit) = winit_backend::init_from_attributes::<GlesRenderer>(
         winit::window::Window::default_attributes()
             .with_title("dwm-wayland")
             .with_visible(true),
@@ -865,24 +1007,23 @@ pub fn run() -> Result<(), Error> {
         .seat
         .add_keyboard(Default::default(), 200, 200)
         .map_err(|e| Error::Other(format!("keyboard: {e:?}")))?;
+    state.loop_signal = Some(event_loop.get_signal());
+    state.update_shm_formats(backend.renderer().shm_formats());
+    state.init_dmabuf_global(&dh, backend.renderer().dmabuf_formats());
 
-    std::env::set_var("WAYLAND_DISPLAY", &socket_name);
-
-    let mut clients = Vec::new();
-    let start_time = Instant::now();
-
-    if std::env::var_os("DWM_WAYLAND_NO_AUTOSTART").is_none() {
-        let term = state.config.terminal.clone();
-        spawn_program(&term, &[]);
+    #[cfg(feature = "xwayland")]
+    {
+        let handle = event_loop.handle();
+        crate::xwayland::spawn_xwayland(handle, &dh, |state, wm, display_number| {
+            crate::xwayland::on_ready_store_on_dwm(state, wm, display_number);
+        })
+        .map_err(Error::Other)?;
     }
 
-    loop {
-        if state.should_quit {
-            info!("quit requested");
-            return Ok(());
-        }
-
-        let status = winit_loop.dispatch_new_events(|event| match event {
+    let start_time = Instant::now();
+    event_loop
+        .handle()
+        .insert_source(winit, move |event, _, state| match event {
             WinitEvent::Resized { size, .. } => {
                 state.resize_output(size.w, size.h);
                 state.monitor.set_screen(Rect::new(0, 0, size.w, size.h));
@@ -891,50 +1032,61 @@ pub fn run() -> Result<(), Error> {
             WinitEvent::Input(event) => {
                 state.process_input_event(event);
             }
-            _ => {}
-        });
-
-        match status {
-            PumpStatus::Continue => {}
-            PumpStatus::Exit(_) => return Ok(()),
-        }
-
-        let size = backend.window_size();
-        let damage = Rectangle::from_size(size);
-
-        state.refresh_status();
-
-        {
-            let (renderer, mut framebuffer) = backend
-                .bind()
-                .map_err(|e| Error::Winit(format!("bind: {e:?}")))?;
-
-            let popup_surfaces = state
-                .render_gles_frame(renderer, &mut framebuffer, size, Transform::Flipped180)
-                .map_err(Error::Winit)?;
-            state.send_frames(start_time.elapsed().as_millis() as u32, &popup_surfaces);
-
-            if let Some(stream) = listener.accept()? {
-                info!("client connected");
-                let client = display
-                    .handle()
-                    .insert_client(stream, Arc::new(ClientState::default()))
-                    .map_err(|e| Error::Other(format!("insert_client: {e}")))?;
-                clients.push(client);
+            WinitEvent::Redraw => {
+                let size = backend.window_size();
+                let damage = Rectangle::from_size(size);
+                state.refresh_status();
+                match backend.bind() {
+                    Ok((renderer, mut framebuffer)) => {
+                        match state.render_gles_frame(
+                            renderer,
+                            &mut framebuffer,
+                            size,
+                            Transform::Flipped180,
+                        ) {
+                            Ok(popup_surfaces) => {
+                                state.send_frames(
+                                    start_time.elapsed().as_millis() as u32,
+                                    &popup_surfaces,
+                                );
+                            }
+                            Err(err) => warn!("render: {err}"),
+                        }
+                    }
+                    Err(err) => warn!("winit bind: {err:?}"),
+                }
+                if let Err(err) = backend.submit(Some(&[damage])) {
+                    warn!("winit submit: {err:?}");
+                }
+                let _ = state.display_handle.flush_clients();
+                backend.window().request_redraw();
             }
+            WinitEvent::CloseRequested => {
+                state.request_quit();
+            }
+            _ => {}
+        })
+        .map_err(|e| Error::Other(format!("winit source: {e}")))?;
 
-            display
-                .dispatch_clients(&mut state)
-                .map_err(|e| Error::Other(format!("dispatch: {e}")))?;
-            display
-                .flush_clients()
-                .map_err(|e| Error::Other(format!("flush: {e}")))?;
-        }
-
-        backend
-            .submit(Some(&[damage]))
-            .map_err(|e| Error::Winit(format!("submit: {e:?}")))?;
+    if std::env::var_os("DWM_WAYLAND_NO_AUTOSTART").is_none() {
+        let term = state.config.terminal.clone();
+        spawn_program(&term, &[]);
     }
+
+    info!("winit backend: entering calloop event loop");
+    event_loop
+        .run(None, &mut state, |state| {
+            if state.should_quit() {
+                if let Some(sig) = &state.loop_signal {
+                    sig.stop();
+                }
+            }
+            let _ = state.display_handle.flush_clients();
+        })
+        .map_err(|e| Error::Other(format!("event loop run: {e}")))?;
+
+    info!("quit requested");
+    Ok(())
 }
 
 pub(crate) fn send_frames_surface_tree(surface: &WlSurface, time: u32) {

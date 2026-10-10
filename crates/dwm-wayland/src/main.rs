@@ -77,9 +77,6 @@ fn main() {
         }
     }
 
-    #[cfg(feature = "xwayland")]
-    xwayland::announce();
-
     if let Err(e) = state::run() {
         eprintln!("dwm-wayland error: {e}");
         process::exit(1);
@@ -128,6 +125,10 @@ KEY BINDINGS (Super / Mod4, or Alt in nested sessions):
 
 STATUS:
     Write a one-line UTF-8 string to $XDG_RUNTIME_DIR/dwm-wayland.status
+
+XWAYLAND:
+    With the default `xwayland` feature, Xwayland is spawned on both nested
+    and --session paths; DISPLAY is set when Ready.
 "
     );
 }
