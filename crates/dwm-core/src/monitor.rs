@@ -1,4 +1,4 @@
-use crate::config::Config;
+use crate::config::{Config, ScratchpadConfig};
 use crate::layout::{self, ArrangeParams, LayoutKind, Rect};
 use crate::tags::{NUM_TAGS, TagMask};
 
@@ -70,6 +70,27 @@ pub enum MonitorAction {
     ClientKilled,
 }
 
+/// One tag cell for the status bar.
+#[derive(Debug, Clone)]
+pub struct BarTag {
+    pub label: String,
+    pub selected: bool,
+    pub occupied: bool,
+    pub urgent: bool,
+}
+
+/// Snapshot of what the status bar should paint.
+#[derive(Debug, Clone)]
+pub struct BarModel {
+    pub tags: Vec<BarTag>,
+    pub layout_symbol: String,
+    pub title: String,
+    pub status: String,
+    pub height: i32,
+    pub width: i32,
+    pub top: bool,
+}
+
 /// One output / monitor worth of dwm state.
 #[derive(Debug, Clone)]
 pub struct Monitor {
@@ -82,6 +103,7 @@ pub struct Monitor {
     pub smart_gaps: bool,
     pub show_bar: bool,
     pub top_bar: bool,
+    pub bar_height: i32,
     pub border_px: i32,
     pub layout: LayoutKind,
     pub prev_layout: LayoutKind,
@@ -93,11 +115,15 @@ pub struct Monitor {
     pub sel: Option<ClientId>,
     next_id: u64,
     default_gaps: Gaps,
+    pub tag_labels: Vec<String>,
+    pub scratchpads: Vec<ScratchpadConfig>,
+    pub status_text: String,
+    pub layout_symbol: String,
 }
 
 impl Monitor {
     pub fn from_config(cfg: &Config, screen: Rect) -> Self {
-        let bar_h = if cfg.show_bar { 24 } else { 0 };
+        let bar_h = if cfg.show_bar { cfg.bar_height } else { 0 };
         let window_area = if cfg.top_bar {
             Rect::new(screen.x, screen.y + bar_h, screen.w, screen.h - bar_h)
         } else {
@@ -113,6 +139,7 @@ impl Monitor {
             smart_gaps: cfg.smart_gaps,
             show_bar: cfg.show_bar,
             top_bar: cfg.top_bar,
+            bar_height: cfg.bar_height,
             border_px: cfg.border_px as i32,
             layout: cfg.default_layout,
             prev_layout: cfg.default_layout,
@@ -123,6 +150,10 @@ impl Monitor {
             sel: None,
             next_id: 1,
             default_gaps: cfg.gaps,
+            tag_labels: cfg.tags.clone(),
+            scratchpads: cfg.scratchpads.clone(),
+            status_text: "dwm-wayland".into(),
+            layout_symbol: cfg.default_layout.symbol().to_string(),
         }
     }
 
@@ -134,13 +165,19 @@ impl Monitor {
         self.tagset[self.seltags]
     }
 
+    /// OR `tags` into the active view (used when claiming a newly spawned scratchpad).
+    pub fn tagset_mut_union(&mut self, tags: TagMask) {
+        let cur = self.tagset[self.seltags];
+        self.tagset[self.seltags] = cur.union(tags);
+    }
+
     pub fn set_screen(&mut self, screen: Rect) {
         self.screen = screen;
         self.recompute_window_area();
     }
 
-    fn recompute_window_area(&mut self) {
-        let bar_h = if self.show_bar { 24 } else { 0 };
+    pub fn recompute_window_area(&mut self) {
+        let bar_h = if self.show_bar { self.bar_height } else { 0 };
         self.window_area = if self.top_bar {
             Rect::new(
                 self.screen.x,
@@ -167,13 +204,123 @@ impl Monitor {
         }
         client.border = self.border_px;
         if client.tags.is_empty() {
-            client.tags = self.tagset();
+            // New clients inherit the current workspace view, never scratch tags.
+            client.tags = self.tagset().difference(TagMask::SCRATCH_MASK);
+            if client.tags.is_empty() {
+                client.tags = TagMask::bit(0);
+            }
         }
         let id = client.id;
         self.clients.push(client);
         self.attach_stack(id);
         self.sel = Some(id);
         id
+    }
+
+    /// If title/app_id matches a scratchpad, retag + float + center it.
+    /// Returns `true` when a scratchpad rule applied.
+    pub fn apply_scratchpad_rule(&mut self, id: ClientId, title: &str, app_id: &str) -> bool {
+        let title_l = title.to_lowercase();
+        let app_l = app_id.to_lowercase();
+        let Some((index, sp)) = self.scratchpads.iter().enumerate().find(|(_, sp)| {
+            let key = sp.match_title.to_lowercase();
+            title_l.contains(&key) || app_l.contains(&key)
+        }) else {
+            return false;
+        };
+        let tags = TagMask::scratch(index as u32);
+        let fw = sp.width;
+        let fh = sp.height;
+        let fx = self.window_area.x + (self.window_area.w - fw).max(0) / 2;
+        let fy = self.window_area.y + (self.window_area.h - fh).max(0) / 2;
+        if let Some(c) = self.client_mut(id) {
+            c.tags = tags;
+            c.floating = true;
+            c.float_geom = Rect::new(fx, fy, fw, fh);
+            c.geom = c.float_geom;
+            if !title.is_empty() {
+                c.name = title.to_string();
+            }
+            if !app_id.is_empty() {
+                c.app_id = app_id.to_string();
+            }
+        }
+        // Ensure the scratch tag is visible so the pad shows up immediately.
+        let cur = self.tagset[self.seltags];
+        self.tagset[self.seltags] = cur.union(tags);
+        self.focus(Some(id));
+        true
+    }
+
+    /// Classic `togglescratch`: XOR the scratch tag into the view; spawn if missing.
+    pub fn toggle_scratch(&mut self, index: usize) -> Option<Vec<String>> {
+        if index >= self.scratchpads.len() {
+            return None;
+        }
+        let scratchtag = TagMask::scratch(index as u32);
+        let existing = self.clients.iter().find(|c| c.tags.contains(scratchtag)).map(|c| c.id);
+
+        if let Some(id) = existing {
+            let newtagset = self.tagset().toggle(scratchtag);
+            if !newtagset.is_empty() {
+                self.tagset[self.seltags] = newtagset;
+            }
+            if self
+                .client(id)
+                .map(|c| c.is_visible(self.tagset()))
+                .unwrap_or(false)
+            {
+                self.focus(Some(id));
+            } else {
+                self.focus_first_visible();
+            }
+            None
+        } else {
+            self.tagset[self.seltags] = self.tagset().union(scratchtag);
+            Some(self.scratchpads[index].command.clone())
+        }
+    }
+
+    pub fn set_status(&mut self, text: impl Into<String>) {
+        self.status_text = text.into();
+    }
+
+    pub fn bar_model(&self) -> BarModel {
+        let occ = self.occupied_tags();
+        let sel = self.tagset();
+        let mut tags = Vec::new();
+        for (i, label) in self.tag_labels.iter().enumerate() {
+            let bit = TagMask::bit(i as u32);
+            let occupied = occ.contains(bit);
+            let selected = sel.contains(bit);
+            // hide vacant tags (classic patch)
+            if !occupied && !selected {
+                continue;
+            }
+            tags.push(BarTag {
+                label: label.clone(),
+                selected,
+                occupied,
+                urgent: self
+                    .clients
+                    .iter()
+                    .any(|c| c.urgent && c.tags.contains(bit)),
+            });
+        }
+        let title = self
+            .sel
+            .and_then(|id| self.client(id))
+            .map(|c| c.name.clone())
+            .unwrap_or_default();
+        BarModel {
+            tags,
+            layout_symbol: self.layout_symbol.clone(),
+            title,
+            status: self.status_text.clone(),
+            height: if self.show_bar { self.bar_height } else { 0 },
+            width: self.screen.w,
+            top: self.top_bar,
+        }
     }
 
     pub fn unmanage(&mut self, id: ClientId) {
@@ -443,6 +590,7 @@ impl Monitor {
             .collect();
 
         let (rects, symbol) = layout::arrange(&tiled_refs, params);
+        self.layout_symbol = symbol.clone();
 
         let mut geometries = Vec::new();
         for (id, rect) in tiled_ids.into_iter().zip(rects.into_iter()) {
@@ -453,15 +601,24 @@ impl Monitor {
         }
 
         // Floating / fullscreen keep their own geometry but are still reported.
-        for c in &self.clients {
-            if c.is_visible(tags) && (c.floating || c.fullscreen) {
+        let floating: Vec<(ClientId, Rect)> = self
+            .clients
+            .iter()
+            .filter(|c| c.is_visible(tags) && (c.floating || c.fullscreen))
+            .map(|c| {
                 let geom = if c.fullscreen {
                     self.screen
                 } else {
                     c.float_geom
                 };
-                geometries.push((c.id, geom));
+                (c.id, geom)
+            })
+            .collect();
+        for (id, geom) in floating {
+            if let Some(c) = self.client_mut(id) {
+                c.geom = geom;
             }
+            geometries.push((id, geom));
         }
 
         // Hide non-visible by reporting zero-size offscreen (compositor may unmap).

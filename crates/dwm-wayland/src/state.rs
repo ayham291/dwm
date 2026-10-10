@@ -53,6 +53,7 @@ use wayland_server::protocol::wl_surface::WlSurface;
 use wayland_server::{Client, DisplayHandle, ListeningSocket, Resource, WEnum};
 use winit::platform::pump_events::PumpStatus;
 
+use crate::bar::StatusBar;
 use crate::bindings::{self, Cmd};
 use crate::color;
 
@@ -91,6 +92,11 @@ struct DwmState {
 
     should_quit: bool,
     layout_symbol: String,
+    status_bar: StatusBar,
+    status_path: String,
+    last_status_read: Instant,
+    /// Scratchpad index waiting to claim the next new toplevel.
+    pending_scratch: Option<usize>,
 }
 
 impl DwmState {
@@ -134,6 +140,7 @@ impl DwmState {
             _output_manager_state: output_manager_state,
             seat,
             output,
+            status_path: config.status_file.clone(),
             monitor: Monitor::from_config(&config, screen),
             config,
             bindings: bindings::default_bindings(),
@@ -141,6 +148,9 @@ impl DwmState {
             surface_clients: HashMap::new(),
             should_quit: false,
             layout_symbol: "[]=".into(),
+            status_bar: StatusBar::new(),
+            last_status_read: Instant::now(),
+            pending_scratch: None,
         }
     }
 
@@ -165,6 +175,10 @@ impl DwmState {
     }
 
     fn apply_command(&mut self, cmd: Command) {
+        let pending = match cmd {
+            Command::ToggleScratch { index } => Some(index),
+            _ => None,
+        };
         let frame = self.monitor.apply(cmd);
         self.layout_symbol = frame.layout_symbol;
         if frame.quit {
@@ -175,9 +189,62 @@ impl DwmState {
                 toplevel.send_close();
             }
         }
+        if let Some(argv) = frame.spawn {
+            if let Some(index) = pending {
+                self.pending_scratch = Some(index);
+            }
+            spawn_argv(&argv);
+        }
         self.push_configures(&frame.geometries);
         if let Some(focus) = frame.focused {
             self.focus_client(focus);
+        }
+    }
+
+    fn refresh_status_file(&mut self) {
+        if self.last_status_read.elapsed() < std::time::Duration::from_millis(500) {
+            return;
+        }
+        self.last_status_read = Instant::now();
+        if let Ok(text) = std::fs::read_to_string(&self.status_path) {
+            let trimmed = text.lines().next().unwrap_or("").trim();
+            if !trimmed.is_empty() {
+                self.monitor.set_status(trimmed.to_string());
+            }
+        }
+    }
+
+    fn sync_client_meta(&mut self, id: ClientId) {
+        let Some(toplevel) = self.toplevels.get(&id) else {
+            return;
+        };
+        // Title / app_id live on the xdg surface attributes once set by the client.
+        let (title, app_id) = smithay::wayland::compositor::with_states(
+            toplevel.wl_surface(),
+            |states| {
+                use smithay::wayland::shell::xdg::XdgToplevelSurfaceData;
+                let guard = states
+                    .data_map
+                    .get::<XdgToplevelSurfaceData>()
+                    .and_then(|d| d.lock().ok());
+                guard
+                    .map(|g| (g.title.clone().unwrap_or_default(), g.app_id.clone().unwrap_or_default()))
+                    .unwrap_or_default()
+            },
+        );
+        if self.monitor.apply_scratchpad_rule(id, &title, &app_id) {
+            let (geoms, symbol) = self.monitor.arrange();
+            self.layout_symbol = symbol;
+            self.push_configures(&geoms);
+            return;
+        }
+        if let Some(c) = self.monitor.client_mut(id) {
+            if !title.is_empty() {
+                c.name = title;
+            }
+            if !app_id.is_empty() {
+                c.app_id = app_id;
+            }
         }
     }
 
@@ -240,6 +307,16 @@ fn spawn_program(bin: &str, args: &[&str]) {
     }
 }
 
+fn spawn_argv(argv: &[String]) {
+    let Some((bin, rest)) = argv.split_first() else {
+        return;
+    };
+    match ProcCommand::new(bin).args(rest).spawn() {
+        Ok(_) => info!("spawned {argv:?}"),
+        Err(e) => warn!("failed to spawn {argv:?}: {e}"),
+    }
+}
+
 impl BufferHandler for DwmState {
     fn buffer_destroyed(&mut self, _buffer: &wl_buffer::WlBuffer) {}
 }
@@ -260,6 +337,31 @@ impl XdgShellHandler for DwmState {
         surface.with_pending_state(|state| {
             state.decoration_mode = Some(XdgDecoMode::ServerSide);
         });
+
+        if let Some(index) = self.pending_scratch.take() {
+            // Force scratchpad role immediately (title may arrive later).
+            if let Some(sp) = self.monitor.scratchpads.get(index).cloned() {
+                let tags = dwm_core::TagMask::scratch(index as u32);
+                let fw = sp.width;
+                let fh = sp.height;
+                let fx = self.monitor.window_area.x
+                    + (self.monitor.window_area.w - fw).max(0) / 2;
+                let fy = self.monitor.window_area.y
+                    + (self.monitor.window_area.h - fh).max(0) / 2;
+                if let Some(c) = self.monitor.client_mut(id) {
+                    c.tags = tags;
+                    c.floating = true;
+                    c.name = sp.name.clone();
+                    c.float_geom = dwm_core::Rect::new(fx, fy, fw, fh);
+                    c.geom = c.float_geom;
+                }
+                self.monitor.tagset_mut_union(tags);
+                info!(
+                    "claimed scratchpad index={index} client={id:?} geom={}x{}+{}+{}",
+                    fw, fh, fx, fy
+                );
+            }
+        }
 
         let (geoms, symbol) = self.monitor.arrange();
         self.layout_symbol = symbol;
@@ -294,6 +396,26 @@ impl XdgShellHandler for DwmState {
             info!("toplevel destroyed client={id:?}");
         }
     }
+
+    fn title_changed(&mut self, surface: ToplevelSurface) {
+        if let Some(id) = self
+            .surface_clients
+            .get(&surface.wl_surface().id().protocol_id())
+            .copied()
+        {
+            self.sync_client_meta(id);
+        }
+    }
+
+    fn app_id_changed(&mut self, surface: ToplevelSurface) {
+        if let Some(id) = self
+            .surface_clients
+            .get(&surface.wl_surface().id().protocol_id())
+            .copied()
+        {
+            self.sync_client_meta(id);
+        }
+    }
 }
 
 impl SelectionHandler for DwmState {
@@ -322,7 +444,13 @@ impl CompositorHandler for DwmState {
 
     fn commit(&mut self, surface: &WlSurface) {
         on_commit_buffer_handler::<Self>(surface);
-        let _ = surface;
+        if let Some(id) = self
+            .surface_clients
+            .get(&surface.id().protocol_id())
+            .copied()
+        {
+            self.sync_client_meta(id);
+        }
     }
 }
 
@@ -537,6 +665,8 @@ pub fn run() -> Result<(), Error> {
         let size = backend.window_size();
         let damage = Rectangle::from_size(size);
 
+        state.refresh_status_file();
+
         {
             let (renderer, mut framebuffer) = backend
                 .bind()
@@ -548,14 +678,32 @@ pub fn run() -> Result<(), Error> {
             let sel_border = color::parse_hex(&state.config.sel_border);
             let norm_border = color::parse_hex(&state.config.norm_border);
             let focused = state.monitor.sel;
+            let bar_model = state.monitor.bar_model();
+            let bar_element = state.status_bar.element(
+                renderer,
+                &bar_model,
+                state.monitor.screen.h,
+                &state.config.norm_bg,
+                &state.config.norm_fg,
+                &state.config.sel_bg,
+                &state.config.sel_fg,
+            );
 
-            // Collect border frames (outer rect including border) then content.
+            // Tiled first, floating (scratchpads) on top — classic dwm stacking.
+            let mut visible: Vec<_> = state
+                .monitor
+                .visible_clients()
+                .into_iter()
+                .filter(|c| c.geom.w > 0 && c.geom.h > 0)
+                .collect();
+            visible.sort_by_key(|c| c.floating || c.fullscreen);
+
             let mut border_rects: Vec<(Rectangle<i32, Logical>, Color32F)> = Vec::new();
-            for client in state.monitor.visible_clients() {
+            for client in visible {
                 let Some(toplevel) = state.toplevels.get(&client.id) else {
                     continue;
                 };
-                if !client.is_visible(tagset) || client.geom.w <= 0 || client.geom.h <= 0 {
+                if !client.is_visible(tagset) {
                     continue;
                 }
                 let border_color = if focused == Some(client.id) {
@@ -563,7 +711,6 @@ pub fn run() -> Result<(), Error> {
                 } else {
                     norm_border
                 };
-                // Layout sizes already subtract 2*border; paint the rim outside the content.
                 let outer = Rectangle::new(
                     (client.geom.x - bw, client.geom.y - bw).into(),
                     (client.geom.w + 2 * bw, client.geom.h + 2 * bw).into(),
@@ -594,6 +741,10 @@ pub fn run() -> Result<(), Error> {
                 frame
                     .clear(*border_color, &[phys])
                     .map_err(|e| Error::Winit(format!("border: {e:?}")))?;
+            }
+            if let Some(bar) = &bar_element {
+                draw_render_elements(&mut frame, 1.0, &[bar], &[damage])
+                    .map_err(|e| Error::Winit(format!("bar: {e:?}")))?;
             }
             draw_render_elements(&mut frame, 1.0, &elements, &[damage])
                 .map_err(|e| Error::Winit(format!("draw: {e:?}")))?;

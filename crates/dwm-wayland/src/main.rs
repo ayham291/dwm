@@ -15,6 +15,7 @@
 //! cargo run -p dwm-wayland -- --check
 //! ```
 
+mod bar;
 mod bindings;
 mod color;
 mod state;
@@ -86,7 +87,13 @@ KEY BINDINGS (Super / Mod4, or Alt in nested sessions):
     q               Kill focused client
     Shift+q         Quit
     Return          Spawn $TERMINAL (default: ghostty)
+    Shift+Return    Toggle spterm scratchpad
+    '               Toggle spcalc scratchpad
+    b               Toggle status bar
     d               Spawn dmenu_run
+
+STATUS:
+    Write a one-line UTF-8 string to $XDG_RUNTIME_DIR/dwm-wayland.status
 "
     );
 }

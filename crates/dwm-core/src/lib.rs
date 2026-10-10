@@ -9,10 +9,10 @@ mod layout;
 mod monitor;
 mod tags;
 
-pub use config::{Config, DEFAULT_TAGS, ModKey};
+pub use config::{Config, DEFAULT_TAGS, ModKey, ScratchpadConfig};
 pub use layout::{ArrangeParams, LayoutKind, Rect, arrange};
-pub use monitor::{Client, ClientId, Gaps, Monitor, MonitorAction};
-pub use tags::{NUM_TAGS, TagMask, tag_bit};
+pub use monitor::{BarModel, BarTag, Client, ClientId, Gaps, Monitor, MonitorAction};
+pub use tags::{NUM_SCRATCHPADS, NUM_TAGS, TagMask, scratch_bit, tag_bit};
 
 /// High-level commands a compositor (or test harness) can issue.
 #[derive(Debug, Clone, PartialEq)]
@@ -37,6 +37,8 @@ pub enum Command {
     IncGaps { delta: i32 },
     ToggleBar,
     ShiftView { delta: i32 },
+    /// Show/hide scratchpad `index` (0 = spterm, 1 = spcalc).
+    ToggleScratch { index: usize },
     KillFocused,
     Quit,
 }
@@ -59,6 +61,8 @@ pub struct Frame {
     pub tagset: TagMask,
     /// Whether the status bar should be shown.
     pub show_bar: bool,
+    /// Spawn this command (scratchpad not yet running).
+    pub spawn: Option<Vec<String>>,
 }
 
 impl Monitor {
@@ -66,6 +70,7 @@ impl Monitor {
     pub fn apply(&mut self, cmd: Command) -> Frame {
         let mut kill = None;
         let mut quit = false;
+        let mut spawn = None;
 
         match cmd {
             Command::FocusStack { delta } => self.focus_stack(delta),
@@ -86,8 +91,12 @@ impl Monitor {
             Command::ToggleSmartGaps => self.toggle_smart_gaps(),
             Command::DefaultGaps => self.default_gaps(),
             Command::IncGaps { delta } => self.inc_gaps(delta),
-            Command::ToggleBar => self.show_bar = !self.show_bar,
+            Command::ToggleBar => {
+                self.show_bar = !self.show_bar;
+                self.recompute_window_area();
+            }
             Command::ShiftView { delta } => self.shift_view(delta),
+            Command::ToggleScratch { index } => spawn = self.toggle_scratch(index),
             Command::KillFocused => kill = self.sel,
             Command::Quit => quit = true,
         }
@@ -101,6 +110,7 @@ impl Monitor {
             quit,
             tagset: self.tagset(),
             show_bar: self.show_bar,
+            spawn,
         }
     }
 }

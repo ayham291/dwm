@@ -20,6 +20,38 @@ The original X11 C sources are preserved under [`legacy/`](legacy/).
 | `dwm-core` | Pure WM state machine + layout algorithms |
 | `dwm-wayland` | Wayland compositor (`smithay` + winit) |
 
+## Configuration
+
+Still edit-and-recompile (suckless-style), split across:
+
+| Concern | File |
+|---------|------|
+| Gaps, colors, terminal, tags, **scratchpads**, bar | `crates/dwm-core/src/config.rs` |
+| Key bindings | `crates/dwm-wayland/src/bindings.rs` |
+
+### Scratchpads
+
+Same idea as Luke’s build:
+
+| Keys | Action |
+|------|--------|
+| `Mod+Shift+Return` | Toggle `spterm` scratchpad (spawn if needed) |
+| `Mod+'` | Toggle `spcalc` scratchpad |
+
+Override the terminal binary with `DWM_WAYLAND_TERM=foot` (uses `-T title`). Default is `ghostty` (`--title=`).
+
+### Status bar
+
+Top bar shows tags · layout · focused title · status text.
+
+Write status the same way dwmblocks wrote the root name — into a file:
+
+```bash
+echo "vol 50% | $(date +%H:%M)" > "${XDG_RUNTIME_DIR:-/tmp}/dwm-wayland.status"
+```
+
+Path defaults to `$XDG_RUNTIME_DIR/dwm-wayland.status` (see `Config::status_file`).
+
 ## Build
 
 ```bash
@@ -73,6 +105,9 @@ Host window managers often grab Super; nested runs also accept **Alt** as the mo
 | `h` / `l` | Shrink / grow master |
 | `o` / `Shift+o` | Inc / dec `nmaster` |
 | `Return` | Spawn terminal (`ghostty`) |
+| `Shift+Return` | Toggle `spterm` scratchpad |
+| `'` | Toggle `spcalc` scratchpad |
+| `b` | Toggle status bar |
 | `d` | `dmenu_run` |
 | `q` / `Shift+q` | Kill client / quit |
 

@@ -211,6 +211,16 @@ pub fn default_bindings() -> Vec<Binding> {
             cmd: Cmd::SpawnTerminal,
         },
         Binding {
+            mods: Mods::LOGO_SHIFT,
+            key: Keysym::Return,
+            cmd: Cmd::Core(Command::ToggleScratch { index: 0 }),
+        },
+        Binding {
+            mods: Mods::LOGO,
+            key: Keysym::apostrophe,
+            cmd: Cmd::Core(Command::ToggleScratch { index: 1 }),
+        },
+        Binding {
             mods: Mods::LOGO,
             key: Keysym::d,
             cmd: Cmd::SpawnDmenu,

@@ -40,6 +40,9 @@ fn default_config_matches_legacy_constants() {
     assert!((cfg.mfact - 0.55).abs() < f32::EPSILON);
     assert_eq!(cfg.gaps.inner_h, 20);
     assert_eq!(cfg.gaps.outer_v, 30);
-    assert_eq!(cfg.terminal, "ghostty");
+    let expected_term = std::env::var("DWM_WAYLAND_TERM").unwrap_or_else(|_| "ghostty".into());
+    assert_eq!(cfg.terminal, expected_term);
     assert_eq!(cfg.tags.len(), 9);
+    assert_eq!(cfg.scratchpads.len(), 2);
+    assert!(cfg.status_file.contains("dwm-wayland.status"));
 }
