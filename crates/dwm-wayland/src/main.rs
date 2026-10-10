@@ -68,7 +68,7 @@ OPTIONS:
     --check     Initialize Wayland globals and dwm-core state, then exit
     -h, --help  Show this help
 
-KEY BINDINGS (Super / Mod4):
+KEY BINDINGS (Super / Mod4, or Alt in nested sessions):
     j / k           Focus next / previous client
     Shift+j / k     Push client down / up the stack
     1..9            View tag
