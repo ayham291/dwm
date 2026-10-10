@@ -188,7 +188,20 @@ Honest status versus replacing X11 dwm as a daily driver:
 - Config is still recompile-time (no runtime `config.h` reload / IPC beyond the status file)
 - Crash recovery, screenshot/screencopy portals, security-context / sandboxed clients
 - Popup seat grabs, tablet/touch, gesture bindings
-- Packaging / display-manager session files for `--session`
+- Hardening / crash recovery for long-running seats
+
+### Display manager session
+
+After `cargo build --release -p dwm-wayland`:
+
+```bash
+sudo ./contrib/install-session.sh
+```
+
+Installs `/usr/local/bin/dwm-wayland` and
+`/usr/local/share/wayland-sessions/dwm-wayland.desktop` so GDM/SDDM/LightDM can
+offer **dwm-wayland** (runs `dwm-wayland --session`). Prefer a test user / spare
+machine until the session backend is battle-tested.
 
 ## Legacy X11 dwm
 
