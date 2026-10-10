@@ -82,7 +82,7 @@ pub struct DwmState {
     data_device_state: DataDeviceState,
     primary_selection_state: PrimarySelectionState,
     _output_manager_state: OutputManagerState,
-    seat: Seat<Self>,
+    pub(crate) seat: Seat<Self>,
     output: Output,
 
     pub monitor: Monitor,
@@ -723,9 +723,7 @@ pub fn run() -> Result<(), Error> {
             WinitEvent::Resized { size, .. } => {
                 state.resize_output(size.w, size.h);
                 state.monitor.set_screen(Rect::new(0, 0, size.w, size.h));
-                let (geoms, symbol) = state.monitor.arrange();
-                state.layout_symbol = symbol;
-                state.push_configures(&geoms);
+                state.rearrange();
             }
             WinitEvent::Input(event) => {
                 state.process_input_event(event);

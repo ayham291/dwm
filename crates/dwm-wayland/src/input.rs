@@ -80,11 +80,11 @@ impl DwmState {
                 pointer.frame(self);
             }
             InputEvent::PointerMotionAbsolute { event, .. } => {
-                let size = (
-                    self.monitor.screen.w as f64,
-                    self.monitor.screen.h as f64,
-                );
-                let pos = event.position_transformed(size.into());
+                let size = smithay::utils::Size::<i32, Logical>::from((
+                    self.monitor.screen.w,
+                    self.monitor.screen.h,
+                ));
+                let pos = event.position_transformed(size);
                 self.pointer_motion(pos, event.time_msec());
                 self.seat.get_pointer().unwrap().frame(self);
             }
@@ -286,7 +286,7 @@ impl DwmState {
         // Prefer popups belonging to this toplevel.
         for (popup, popup_offset) in PopupManager::popups_for_surface(toplevel.wl_surface()) {
             let geo = popup.geometry();
-            let origin = Point::from((
+            let origin: Point<f64, Logical> = Point::from((
                 win_loc.0 + popup_offset.x as f64 + geo.loc.x as f64,
                 win_loc.1 + popup_offset.y as f64 + geo.loc.y as f64,
             ));
