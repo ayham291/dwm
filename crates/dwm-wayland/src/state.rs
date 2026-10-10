@@ -436,6 +436,7 @@ pub fn run() -> Result<(), Error> {
             WinitEvent::Input(event) => {
                 if let InputEvent::Keyboard { event } = event {
                     let keyboard = state.seat.get_keyboard().unwrap();
+                    let pressed = event.state() == KeyState::Pressed;
                     keyboard.input::<(), _>(
                         &mut state,
                         event.key_code(),
@@ -443,8 +444,13 @@ pub fn run() -> Result<(), Error> {
                         Serial::from(0),
                         0,
                         |state, modifiers, handle| {
-                            if event.state() == KeyState::Pressed {
-                                let keysym = handle.modified_sym();
+                            if pressed {
+                                // Prefer raw keysyms so Shift doesn't turn `u` into `U`.
+                                let keysym = handle
+                                    .raw_syms()
+                                    .first()
+                                    .copied()
+                                    .unwrap_or_else(|| handle.modified_sym());
                                 state.handle_key(keysym, modifiers);
                             }
                             FilterResult::Forward

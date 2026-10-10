@@ -38,6 +38,24 @@ impl Mods {
             && state.logo == self.logo
             && state.alt == self.alt
     }
+
+    /// Match allowing either Super or Alt as the "mod" key. Nested X11 sessions
+    /// often have Super grabbed by the host WM, so Alt is a practical fallback.
+    pub fn matches_flexible_mod(self, state: &ModifiersState) -> bool {
+        if self.matches(state) {
+            return true;
+        }
+        if !self.logo {
+            return false;
+        }
+        let alt_variant = Mods {
+            logo: false,
+            alt: true,
+            ctrl: self.ctrl,
+            shift: self.shift,
+        };
+        alt_variant.matches(state)
+    }
 }
 
 /// Commands that may spawn external processes in addition to dwm-core Commands.
@@ -240,6 +258,6 @@ pub fn default_bindings() -> Vec<Binding> {
 pub fn lookup(bindings: &[Binding], mods: &ModifiersState, key: Keysym) -> Option<Cmd> {
     bindings
         .iter()
-        .find(|b| b.key == key && b.mods.matches(mods))
+        .find(|b| b.key == key && b.mods.matches_flexible_mod(mods))
         .map(|b| b.cmd.clone())
 }
