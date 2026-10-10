@@ -10,6 +10,22 @@ rust-version = "1.80"
 name = "dwm-wayland"
 path = "src/main.rs"
 
+[features]
+default = ["session", "xwayland"]
+# DRM / libseat / libinput TTY session (login-session capable)
+session = [
+    "smithay/backend_libinput",
+    "smithay/backend_udev",
+    "smithay/backend_drm",
+    "smithay/backend_gbm",
+    "smithay/backend_session_libseat",
+    "smithay/renderer_multi",
+    "dep:xcursor",
+    "dep:smithay-drm-extras",
+]
+# Run X11 apps via Xwayland
+xwayland = ["smithay/xwayland", "dep:x11rb"]
+
 [dependencies]
 dwm-core = { workspace = true }
 tracing = { workspace = true }
@@ -19,6 +35,10 @@ wayland-server = "0.31.9"
 wayland-protocols = { version = "0.32.8", features = ["server", "staging", "unstable"] }
 wayland-protocols-misc = { version = "0.3.8", features = ["server"] }
 ab_glyph = "0.2"
+calloop = "0.14"
+xcursor = { version = "0.3", optional = true }
+smithay-drm-extras = { version = "0.1", optional = true }
+x11rb = { version = "0.13", default-features = false, features = ["allow-unsafe-code", "cursor"], optional = true }
 
 [dependencies.winit]
 version = "0.30"

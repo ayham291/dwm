@@ -6,7 +6,7 @@
 //! Run nested under an existing X11/Wayland session:
 //!
 //! ```text
-//! cargo run -p dwm-wayland
+//! cargo run -p dwm-wayland --no-default-features
 //! ```
 //!
 //! Headless smoke-test (protocols only, no GPU loop):
@@ -14,11 +14,25 @@
 //! ```text
 //! cargo run -p dwm-wayland -- --check
 //! ```
+//!
+//! Attempt a libseat/udev session backend (feature `session`):
+//!
+//! ```text
+//! cargo run -p dwm-wayland -- --session
+//! ```
 
 mod bar;
 mod bindings;
 mod color;
+mod grabs;
+mod input;
 mod state;
+
+#[cfg(feature = "session")]
+mod backends;
+
+#[cfg(feature = "xwayland")]
+mod xwayland;
 
 use std::env;
 use std::process;
@@ -47,6 +61,25 @@ fn main() {
         }
     }
 
+    if args.iter().any(|a| a == "--session") {
+        #[cfg(feature = "session")]
+        {
+            if let Err(e) = backends::udev::run() {
+                eprintln!("dwm-wayland session error: {e}");
+                process::exit(1);
+            }
+            return;
+        }
+        #[cfg(not(feature = "session"))]
+        {
+            eprintln!("--session requires the 'session' cargo feature");
+            process::exit(1);
+        }
+    }
+
+    #[cfg(feature = "xwayland")]
+    xwayland::announce();
+
     if let Err(e) = state::run() {
         eprintln!("dwm-wayland error: {e}");
         process::exit(1);
@@ -68,6 +101,7 @@ USAGE:
 
 OPTIONS:
     --check     Initialize Wayland globals and dwm-core state, then exit
+    --session   Run the libseat/udev TTY session backend (feature: session)
     -h, --help  Show this help
 
 KEY BINDINGS (Super / Mod4, or Alt in nested sessions):

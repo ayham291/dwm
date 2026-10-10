@@ -7,7 +7,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use dwm_core::{Client as DwmClient, ClientId, Command, Config, Monitor, Rect};
-use smithay::backend::input::{InputEvent, KeyState, KeyboardKeyEvent};
 use smithay::backend::renderer::element::surface::{
     render_elements_from_surface_tree, WaylandSurfaceRenderElement,
 };
@@ -16,20 +15,23 @@ use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::utils::{draw_render_elements, on_commit_buffer_handler};
 use smithay::backend::renderer::{Color32F, Frame, Renderer};
 use smithay::backend::winit::{self as winit_backend, WinitEvent};
-use smithay::input::keyboard::FilterResult;
+use smithay::desktop::{find_popup_root_surface, PopupKind, PopupManager};
 use smithay::input::{Seat, SeatHandler, SeatState};
-use smithay::reexports::wayland_server::protocol::wl_seat;
-use smithay::reexports::wayland_server::Display;
 use smithay::output::{Mode as OutputMode, Output, PhysicalProperties, Scale, Subpixel};
+use smithay::reexports::wayland_server::protocol::{wl_output, wl_seat};
+use smithay::reexports::wayland_server::Display;
 use smithay::utils::{Logical, Point, Rectangle, Serial, Size, Transform};
 use smithay::wayland::buffer::BufferHandler;
-use smithay::wayland::output::{OutputHandler, OutputManagerState};
 use smithay::wayland::compositor::{
     with_surface_tree_downward, CompositorClientState, CompositorHandler, CompositorState,
     SurfaceAttributes, TraversalAction,
 };
+use smithay::wayland::output::{OutputHandler, OutputManagerState};
 use smithay::wayland::selection::data_device::{
     ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
+};
+use smithay::wayland::selection::primary_selection::{
+    PrimarySelectionHandler, PrimarySelectionState,
 };
 use smithay::wayland::selection::SelectionHandler;
 use smithay::wayland::shell::kde::decoration::{KdeDecorationHandler, KdeDecorationState};
@@ -40,7 +42,8 @@ use smithay::wayland::shell::xdg::{
 use smithay::wayland::shm::{ShmHandler, ShmState};
 use smithay::{
     delegate_compositor, delegate_data_device, delegate_kde_decoration, delegate_output,
-    delegate_seat, delegate_shm, delegate_xdg_decoration, delegate_xdg_shell,
+    delegate_primary_selection, delegate_seat, delegate_shm, delegate_xdg_decoration,
+    delegate_xdg_shell,
 };
 use tracing::{info, warn};
 use wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as XdgDecoMode;
@@ -54,7 +57,7 @@ use wayland_server::{Client, DisplayHandle, ListeningSocket, Resource, WEnum};
 use winit::platform::pump_events::PumpStatus;
 
 use crate::bar::StatusBar;
-use crate::bindings::{self, Cmd};
+use crate::bindings;
 use crate::color;
 
 #[derive(Debug, thiserror::Error)]
@@ -69,7 +72,7 @@ pub enum Error {
     Other(String),
 }
 
-struct DwmState {
+pub struct DwmState {
     compositor_state: CompositorState,
     xdg_shell_state: XdgShellState,
     _xdg_decoration_state: XdgDecorationState,
@@ -77,21 +80,24 @@ struct DwmState {
     shm_state: ShmState,
     seat_state: SeatState<Self>,
     data_device_state: DataDeviceState,
+    primary_selection_state: PrimarySelectionState,
     _output_manager_state: OutputManagerState,
     seat: Seat<Self>,
     output: Output,
 
-    monitor: Monitor,
-    config: Config,
-    bindings: Vec<bindings::Binding>,
+    pub monitor: Monitor,
+    pub config: Config,
+    pub bindings: Vec<bindings::Binding>,
 
     /// Map dwm ClientId → xdg toplevel.
-    toplevels: HashMap<ClientId, ToplevelSurface>,
+    pub toplevels: HashMap<ClientId, ToplevelSurface>,
     /// Map wl_surface id → ClientId for commit lookups.
     surface_clients: HashMap<u32, ClientId>,
 
     should_quit: bool,
-    layout_symbol: String,
+    pub layout_symbol: String,
+    pub pointer_location: Point<f64, Logical>,
+    pub popups: PopupManager,
     status_bar: StatusBar,
     status_path: String,
     last_status_read: Instant,
@@ -103,7 +109,8 @@ impl DwmState {
     fn new(dh: &DisplayHandle, screen: Rect) -> Self {
         let config = Config::default();
         let mut seat_state = SeatState::new();
-        let seat = seat_state.new_wl_seat(dh, "dwm");
+        let mut seat = seat_state.new_wl_seat(dh, "dwm");
+        seat.add_pointer();
 
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(dh);
         let output = Output::new(
@@ -137,6 +144,7 @@ impl DwmState {
             shm_state: ShmState::new::<Self>(dh, vec![]),
             seat_state,
             data_device_state: DataDeviceState::new::<Self>(dh),
+            primary_selection_state: PrimarySelectionState::new::<Self>(dh),
             _output_manager_state: output_manager_state,
             seat,
             output,
@@ -148,10 +156,19 @@ impl DwmState {
             surface_clients: HashMap::new(),
             should_quit: false,
             layout_symbol: "[]=".into(),
+            pointer_location: Point::from((screen.w as f64 / 2.0, screen.h as f64 / 2.0)),
+            popups: PopupManager::default(),
             status_bar: StatusBar::new(),
             last_status_read: Instant::now(),
             pending_scratch: None,
         }
+    }
+
+    /// Re-run the layout engine and push configures to all mapped clients.
+    pub fn rearrange(&mut self) {
+        let (geoms, symbol) = self.monitor.arrange();
+        self.layout_symbol = symbol;
+        self.push_configures(&geoms);
     }
 
     fn resize_output(&mut self, w: i32, h: i32) {
@@ -174,7 +191,7 @@ impl DwmState {
         );
     }
 
-    fn apply_command(&mut self, cmd: Command) {
+    pub(crate) fn apply_command(&mut self, cmd: Command) {
         let pending = match cmd {
             Command::ToggleScratch { index } => Some(index),
             _ => None,
@@ -258,7 +275,7 @@ impl DwmState {
         }
     }
 
-    fn push_configures(&mut self, geometries: &[(ClientId, Rect)]) {
+    pub(crate) fn push_configures(&mut self, geometries: &[(ClientId, Rect)]) {
         for (id, rect) in geometries {
             let Some(toplevel) = self.toplevels.get(id) else {
                 continue;
@@ -266,12 +283,18 @@ impl DwmState {
             if rect.w <= 0 || rect.h <= 0 {
                 toplevel.with_pending_state(|state| {
                     state.states.unset(xdg_toplevel::State::Activated);
+                    state.states.unset(xdg_toplevel::State::Fullscreen);
                 });
                 toplevel.send_configure();
                 continue;
             }
             let size = Size::<i32, Logical>::from((rect.w, rect.h));
             let activated = self.monitor.sel == Some(*id);
+            let fullscreen = self
+                .monitor
+                .client(*id)
+                .map(|c| c.fullscreen)
+                .unwrap_or(false);
             toplevel.with_pending_state(|state| {
                 state.size = Some(size);
                 if activated {
@@ -279,12 +302,17 @@ impl DwmState {
                 } else {
                     state.states.unset(xdg_toplevel::State::Activated);
                 }
+                if fullscreen {
+                    state.states.set(xdg_toplevel::State::Fullscreen);
+                } else {
+                    state.states.unset(xdg_toplevel::State::Fullscreen);
+                }
             });
             toplevel.send_configure();
         }
     }
 
-    fn focus_client(&mut self, id: ClientId) {
+    pub(crate) fn focus_client(&mut self, id: ClientId) {
         if let Some(toplevel) = self.toplevels.get(&id) {
             let surface = toplevel.wl_surface().clone();
             if let Some(keyboard) = self.seat.get_keyboard() {
@@ -293,24 +321,29 @@ impl DwmState {
         }
     }
 
-    fn handle_key(
-        &mut self,
-        keysym: smithay::input::keyboard::Keysym,
-        mods: &smithay::input::keyboard::ModifiersState,
-    ) {
-        let Some(cmd) = bindings::lookup(&self.bindings, mods, keysym) else {
-            return;
-        };
-        match cmd {
-            Cmd::Core(c) => self.apply_command(c),
-            Cmd::SpawnTerminal => spawn_program(&self.config.terminal, &[]),
-            Cmd::SpawnDmenu => spawn_program("dmenu_run", &[]),
+    fn unconstrain_popup(&self, surface: &PopupSurface, positioner: PositionerState) {
+        // Constraint rectangle in parent-local coordinates covering the output.
+        let mut target = Rectangle::new(
+            (0, 0).into(),
+            (self.monitor.screen.w, self.monitor.screen.h).into(),
+        );
+        if let Ok(root) = find_popup_root_surface(&PopupKind::Xdg(surface.clone())) {
+            if let Some(id) = self.surface_clients.get(&root.id().protocol_id()).copied() {
+                if let Some(c) = self.monitor.client(id) {
+                    target = Rectangle::new(
+                        (-c.geom.x, -c.geom.y).into(),
+                        (self.monitor.screen.w, self.monitor.screen.h).into(),
+                    );
+                }
+            }
         }
+        surface.with_pending_state(|state| {
+            state.geometry = positioner.get_unconstrained_geometry(target);
+        });
     }
-
 }
 
-fn spawn_program(bin: &str, args: &[&str]) {
+pub(crate) fn spawn_program(bin: &str, args: &[&str]) {
     match ProcCommand::new(bin).args(args).spawn() {
         Ok(_) => info!("spawned {bin}"),
         Err(e) => warn!("failed to spawn {bin}: {e}"),
@@ -375,16 +408,58 @@ impl XdgShellHandler for DwmState {
         info!("new toplevel client={id:?} layout={}", self.layout_symbol);
     }
 
-    fn new_popup(&mut self, _surface: PopupSurface, _positioner: PositionerState) {}
+    fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
+        self.unconstrain_popup(&surface, positioner);
+        if let Err(err) = self.popups.track_popup(PopupKind::from(surface.clone())) {
+            warn!("failed to track popup: {err:?}");
+        }
+        if let Err(err) = surface.send_configure() {
+            warn!("popup initial configure: {err:?}");
+        }
+    }
 
-    fn grab(&mut self, _surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {}
+    fn grab(&mut self, surface: PopupSurface, _seat: wl_seat::WlSeat, serial: Serial) {
+        // Full seat grab wiring needs KeyboardFocus: From<PopupKind>; stub for now.
+        info!(
+            "popup grab requested serial={serial:?} surface={:?}",
+            surface.wl_surface().id()
+        );
+    }
 
     fn reposition_request(
         &mut self,
-        _surface: PopupSurface,
-        _positioner: PositionerState,
-        _token: u32,
+        surface: PopupSurface,
+        positioner: PositionerState,
+        token: u32,
     ) {
+        self.unconstrain_popup(&surface, positioner);
+        surface.send_repositioned(token);
+    }
+
+    fn fullscreen_request(
+        &mut self,
+        surface: ToplevelSurface,
+        _output: Option<wl_output::WlOutput>,
+    ) {
+        let protocol_id = surface.wl_surface().id().protocol_id();
+        if let Some(id) = self.surface_clients.get(&protocol_id).copied() {
+            if let Some(c) = self.monitor.client_mut(id) {
+                c.fullscreen = true;
+            }
+            self.rearrange();
+            info!("fullscreen client={id:?}");
+        }
+    }
+
+    fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
+        let protocol_id = surface.wl_surface().id().protocol_id();
+        if let Some(id) = self.surface_clients.get(&protocol_id).copied() {
+            if let Some(c) = self.monitor.client_mut(id) {
+                c.fullscreen = false;
+            }
+            self.rearrange();
+            info!("unfullscreen client={id:?}");
+        }
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
@@ -427,6 +502,12 @@ impl SelectionHandler for DwmState {
     type SelectionUserData = ();
 }
 
+impl PrimarySelectionHandler for DwmState {
+    fn primary_selection_state(&self) -> &PrimarySelectionState {
+        &self.primary_selection_state
+    }
+}
+
 impl DataDeviceHandler for DwmState {
     fn data_device_state(&self) -> &DataDeviceState {
         &self.data_device_state
@@ -449,6 +530,17 @@ impl CompositorHandler for DwmState {
 
     fn commit(&mut self, surface: &WlSurface) {
         on_commit_buffer_handler::<Self>(surface);
+        self.popups.commit(surface);
+
+        // Send initial / pending popup configure after role commit.
+        if let Some(PopupKind::Xdg(popup)) = self.popups.find_popup(surface) {
+            if popup.has_pending_changes() {
+                if let Err(err) = popup.send_configure() {
+                    warn!("popup configure on commit: {err:?}");
+                }
+            }
+        }
+
         if let Some(id) = self
             .surface_clients
             .get(&surface.id().protocol_id())
@@ -539,6 +631,7 @@ delegate_compositor!(DwmState);
 delegate_shm!(DwmState);
 delegate_seat!(DwmState);
 delegate_data_device!(DwmState);
+delegate_primary_selection!(DwmState);
 delegate_output!(DwmState);
 
 #[derive(Default)]
@@ -635,29 +728,7 @@ pub fn run() -> Result<(), Error> {
                 state.push_configures(&geoms);
             }
             WinitEvent::Input(event) => {
-                if let InputEvent::Keyboard { event } = event {
-                    let keyboard = state.seat.get_keyboard().unwrap();
-                    let pressed = event.state() == KeyState::Pressed;
-                    keyboard.input::<(), _>(
-                        &mut state,
-                        event.key_code(),
-                        event.state(),
-                        Serial::from(0),
-                        0,
-                        |state, modifiers, handle| {
-                            if pressed {
-                                // Prefer raw keysyms so Shift doesn't turn `u` into `U`.
-                                let keysym = handle
-                                    .raw_syms()
-                                    .first()
-                                    .copied()
-                                    .unwrap_or_else(|| handle.modified_sym());
-                                state.handle_key(keysym, modifiers);
-                            }
-                            FilterResult::Forward
-                        },
-                    );
-                }
+                state.process_input_event(event);
             }
             _ => {}
         });
@@ -710,6 +781,8 @@ pub fn run() -> Result<(), Error> {
                 Vec<WaylandSurfaceRenderElement<GlesRenderer>>,
                 Rectangle<i32, Logical>,
             )> = Vec::new();
+            let mut popup_draws: Vec<Vec<WaylandSurfaceRenderElement<GlesRenderer>>> = Vec::new();
+            let mut popup_frame_surfaces: Vec<WlSurface> = Vec::new();
             for client in visible {
                 let Some(toplevel) = state.toplevels.get(&client.id) else {
                     continue;
@@ -740,6 +813,26 @@ pub fn run() -> Result<(), Error> {
                     Kind::Unspecified,
                 );
                 draws.push((outer, border_color, surf, clip));
+
+                // Popups stack above their parent toplevel.
+                for (popup, offset) in PopupManager::popups_for_surface(toplevel.wl_surface()) {
+                    let geo = popup.geometry();
+                    let popup_loc: Point<i32, Logical> = (
+                        client.geom.x + offset.x + geo.loc.x,
+                        client.geom.y + offset.y + geo.loc.y,
+                    )
+                        .into();
+                    let popup_surf = render_elements_from_surface_tree(
+                        renderer,
+                        popup.wl_surface(),
+                        popup_loc.to_physical_precise_round(1.0),
+                        1.0,
+                        1.0,
+                        Kind::Unspecified,
+                    );
+                    popup_draws.push(popup_surf);
+                    popup_frame_surfaces.push(popup.wl_surface().clone());
+                }
             }
 
             let mut frame = renderer
@@ -765,6 +858,11 @@ pub fn run() -> Result<(), Error> {
                 draw_render_elements(&mut frame, 1.0, surf, &[clip_phys])
                     .map_err(|e| Error::Winit(format!("draw: {e:?}")))?;
             }
+            // xdg popups above all clients.
+            for surf in &popup_draws {
+                draw_render_elements(&mut frame, 1.0, surf, &[damage])
+                    .map_err(|e| Error::Winit(format!("popup: {e:?}")))?;
+            }
             let _ = frame
                 .finish()
                 .map_err(|e| Error::Winit(format!("finish: {e:?}")))?;
@@ -775,6 +873,10 @@ pub fn run() -> Result<(), Error> {
                     start_time.elapsed().as_millis() as u32,
                 );
             }
+            for surface in &popup_frame_surfaces {
+                send_frames_surface_tree(surface, start_time.elapsed().as_millis() as u32);
+            }
+            state.popups.cleanup();
 
             if let Some(stream) = listener.accept()? {
                 info!("client connected");
